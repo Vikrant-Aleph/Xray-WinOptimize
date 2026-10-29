@@ -8,7 +8,7 @@
 
 ## 下载与安装（Windows x64）
 
-1. 打开本仓库的 **Actions**，运行 `Track upstream Xray release and build experimental TCP backend`，或下载已有的成功构建 Artifact。只有仓库所有者主动开启实验预发布后，才会在 **Releases** 中出现可下载版本。
+1. 打开本仓库的 **Actions**，运行 `Xray-WinOptimize experimental build`，或下载已有的成功构建 Artifact。只有仓库所有者主动开启实验预发布后，才会在 **Releases** 中出现可下载版本。
 2. 解压构建 ZIP，保留原版 `xray.exe` 作为回退。构建包默认只包含 `xray-winrecv-experimental.exe`、构建信息和说明，**不包含 WinDivert 驱动**。
 3. 从 [WinDivert 官方发布页](https://github.com/basil00/WinDivert/releases/tag/v2.2.2)获取匹配的 Windows x64 `WinDivert.dll` 和签名的 `WinDivert64.sys`，放在实验版 EXE 所在目录。不要从不明来源下载驱动。
 4. 使用原来的 Xray 配置文件，移除此前测试添加的 `SO_RCVBUF` 自定义选项。在**管理员 PowerShell** 中执行（替换实际配置路径）：

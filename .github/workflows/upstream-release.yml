@@ -5,8 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: 'Specific upstream Xray tag (empty = latest release)'
+        description: 'Optional upstream tag; leave empty for latest published release (including prereleases)'
         required: false
+        default: ''
         type: string
 permissions:
   contents: write
@@ -25,20 +26,45 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
         run: |
-          $tag = $env:REQUESTED_TAG
-          if (-not $tag) {
-            $releases = gh api 'repos/XTLS/Xray-core/releases?per_page=15' | ConvertFrom-Json
-            $latest = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
-            if (-not $latest) { throw 'No upstream releases found' }
-            $tag = $latest.tag_name
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
           }
+          $tag = $env:REQUESTED_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            # Both manual and scheduled runs use the newest published upstream release.
+            # Include prereleases (but not drafts), ordered by publication time.
+            $releases = @(Invoke-RestMethod -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30' -Headers $headers -ErrorAction Stop)
+            $latest = $releases |
+              Where-Object { -not $_.draft -and $_.published_at } |
+              Sort-Object -Property @{ Expression = { [datetimeoffset]$_.published_at }; Descending = $true } |
+              Select-Object -First 1
+            if (-not $latest) { throw 'No published upstream Xray releases found' }
+            $tag = $latest.tag_name
+            Write-Host "Using latest upstream published release: $tag (prereleases included)"
+          } else {
+            Write-Host "Using manually specified upstream release: $tag"
+          }
+          $tag = $tag.Trim()
           if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unexpected upstream tag $tag" }
           $release = "$tag-winrecv-experimental"
+          Write-Host "Selected upstream tag: $tag"
+          Write-Host "Checking project release tag: $release"
+
+          # A missing release is expected on a new repository. GitHub returns 404;
+          # do not use `gh release view` here: native-command exit code 1 can abort pwsh.
+          $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/releases/tags/$release"
+          $check = Invoke-WebRequest -Method Get -Uri $uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
+          switch ([int]$check.StatusCode) {
+            200 { $exists = 'true';  Write-Host 'Experimental release already exists: skipping duplicate build.' }
+            404 { $exists = 'false'; Write-Host 'Experimental release not found (HTTP 404): proceeding with build.' }
+            default { throw "Cannot check experimental release: HTTP $($check.StatusCode), $uri" }
+          }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "release=$release" >> $env:GITHUB_OUTPUT
-          gh release view $release --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT }
-          else { "exists=false" >> $env:GITHUB_OUTPUT }
+          "exists=$exists" >> $env:GITHUB_OUTPUT
       - name: Clone exact upstream tag
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh

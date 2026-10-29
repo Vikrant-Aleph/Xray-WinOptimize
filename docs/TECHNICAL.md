@@ -316,16 +316,16 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 
 文件：`.github/workflows/upstream-release.yml`。
 
-1. 每 6 小时定时检查一次（UTC cron `21 */6 * * *`），也支持 `workflow_dispatch` 指定 `upstream_tag`。
-2. 从 Xray GitHub Releases 前 15 条中取最新非 draft 发布；只接受 `^v[0-9]+\.[0-9]+\.[0-9]+$` 形式的 tag，其他格式拒绝。
-3. 检查本仓库是否已有 `$tag-winrecv-experimental` Release；若已有则跳过，以避免重复发布。**若只上传过 Actions artifact、没有正式 Release，则后续定时运行可能反复构建相同上游标签。**
+1. 每 6 小时定时检查一次（UTC cron `21 */6 * * *`），也支持 `workflow_dispatch` 指定 `upstream_tag`。手动运行 `upstream_tag` 默认**空字符串**，与定时运行一样自动跟踪上游最新发布；填写具体 tag 才固定版本。
+2. 当 `upstream_tag` 为空（手动默认或定时运行）时，调用 GitHub REST API 列出 Xray Releases，排除 draft、包含 prerelease，按 `published_at` 倒序选择最新发布；只接受 `^v[0-9]+\.[0-9]+\.[0-9]+$` 形式的 tag，其他格式拒绝。提供非空 `upstream_tag` 时直接使用指定标签。API 请求出错会明确停止。
+3. 通过 GitHub REST API `GET /repos/{owner}/{repo}/releases/tags/{tag}` 检查 `$tag-winrecv-experimental` Release。HTTP 200 表示已存在、跳过；HTTP 404 表示尚不存在、继续构建；其他响应按错误处理并显示状态码。不可直接用 `gh release view` 的退出码作不存在判断，因为 Windows Actions 的 `pwsh` 可能会在非零退出码时提前终止。**若只上传 Actions artifact、没有正式 Release，后续定时运行仍可能重复构建该上游版本。**
 4. `git clone --depth 1 --branch <tag>` 精确获取上游源码；记录 commit hash；按上游 `go.mod` 配置 Go 工具链。
 5. 运行控制器/适配层检查、模拟补丁器测试、应用补丁、`gofmt`、编译 Windows amd64 Xray。
 6. 打包 EXE、上游 commit、中英文 README、**完整技术文档 `TECHNICAL.md`**、详细安装文档及 SHA256；上传 GitHub Actions Artifact。
 7. **默认不会创建 GitHub Release。** 只有仓库变量 `ENABLE_EXPERIMENTAL_PRERELEASE=true` 时才创建带 `--prerelease` 标记的 GitHub Release。
 8. 编译成功只说明代码可编译，不是实机网络通过；默认不应把公开预发布视为稳定发布。
 
-当前工作流在 Windows runner 执行，但**尚无真实 Actions 运行日志证明整个流程已成功**。
+2026-10-29 首次真实 Actions 运行在版本/Release 检查步骤返回退出码 1，尚未下载上游源码；该步骤已修复，**新逻辑仍需下一次 Actions 运行确认**。全工程构建及联网验证尚未完成。
 
 ### 9.4 文档同步检查
 
@@ -350,7 +350,7 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 | VLESS / REALITY / Vision | **未验证** | 需要真实用户配置握手与数据校验 |
 | 高 RTT 下载能否优于固定 SO_RCVBUF | **未验证** | 需要控制条件下 A/B/A 测试 |
 | IPv6、VPN、多网卡、休眠恢复 | **未验证** | 覆盖测试与故障恢复测试 |
-| GitHub 定时构建与发布 | **未验证** | 真实 workflow run 与 release 页面 |
+| GitHub 定时构建与发布 | **首次运行失败，入口步骤已修复，待复验** | `logs_110717158087.zip` 中 `Determine upstream tag and check idempotence` 的 exit code 1；仍需成功运行的 Actions 日志 |
 | 文档同步 CI | 新增，需要 GitHub 首次运行确认 | `tests/check_technical_doc.py` + `tests/test_doc_policy.py` |
 
 ### 10.2 高优先级风险
@@ -426,6 +426,26 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 - **回退方法：** 如何恢复此前版本。
 - **遗留问题：** 需要后续维护者继续做什么。
 ```
+
+### 2026-10-29 — 默认始终构建上游最新发布（手动、定时一致）
+
+- **问题／目标：** 第一次 Actions 修复将手动触发的 `upstream_tag` 固定预填为 `v26.10.21`，与项目自动跟随 Xray 新发布的目标不符。用户要求默认使用上游最新版本。
+- **涉及文件：** `.github/workflows/upstream-release.yml` 的 `workflow_dispatch.inputs.upstream_tag.default` 与 `Determine upstream tag and check idempotence`；`docs/PUBLISH-GITHUB.md` 和本文件 §9.3、§13。
+- **行为变化：** 手动构建的版本输入默认为空，定时构建也不提供版本输入；两者都查询 Xray 上游 Release 列表，排除草稿、包含预发布，按 `published_at` 选择最近发布的版本。手动填写 `v26.10.21` 等标签仍可明确指定版本。HTTP 200/404 Release 检查与后续编译流程保持不变。
+- **验证：** 静态检查工作流版本输入为空及自动选版逻辑、YAML 解析、项目既有 Python/Go 单元测试；**GitHub Actions 实际在线运行和 Xray 全工程构建仍待验证**。
+- **兼容性与风险：** 最新上游代码可能改变补丁锚点或 Go 依赖，导致严格打补丁／编译失败；失败应停止并修复，不自动退回旧版本。当前“最新”按发布时间定义，不等于 GitHub `/releases/latest`（后者不含预发布）。
+- **回退方法：** 回退本工作流和文档修改；如需要只构建旧版，推荐在手动触发时填写明确标签，而不是修改默认值。
+- **遗留问题：** 运行新工作流验证最新版本的真实补丁兼容性；实验预发布关闭时，每 6 小时可能重复尝试同一版本，后续需引入构建成功标记。
+
+### 2026-10-29 — 修复首次 GitHub Actions 版本与 Release 检查（Run 110717158087）
+
+- **问题／目标：** 新建仓库首次运行 Actions 时，在 `Determine upstream tag and check idempotence` 以退出码 1 失败；未进入 Xray 克隆和编译。原逻辑运行 `gh release view` 并将非零退出码视为不存在，但 PowerShell runner 可能直接终止步骤；其错误输出又被重定向到 `$null`，无法精确确认是哪条 native 命令终止。日志显示 `REQUESTED_TAG` 为空，因此自动选择最新上游发布而非指定基线版本。
+- **涉及文件：** `.github/workflows/upstream-release.yml`、`README.md`、`docs/PUBLISH-GITHUB.md` 和本文 §9.3、§10 及变更记录。
+- **行为变化：** 手动运行默认预填 `v26.10.21`；定时任务仍采用最新上游版本；Release 检查改用 PowerShell `Invoke-WebRequest -SkipHttpErrorCheck`，只把 HTTP 404 当作未发布，HTTP 200 当作已发布，其他状态报错；明确打印所选上游 tag 和 API 检查状态。未修改 TCP 协议栈、WinDivert、窗口控制器或补丁锚点。
+- **验证：** 解压用户提供的 Actions 日志并确认 `checkout` 成功、版本检查步骤退出码 1、后续步骤均未运行；本地 YAML 解析和 Python/Go 项目测试通过。**修复后的 GitHub Actions 在线执行尚未验证**；PowerShell 逻辑尚未在真实 runner 上执行。
+- **兼容性与风险：** `-SkipHttpErrorCheck` 需要 PowerShell 7，工作流声明 `shell: pwsh`；REST API 需可访问 GitHub 并拥有读取 release 权限。错误 HTTP 状态不会被悄悄当作“未发布”。
+- **回退方法：** 回退该工作流和文档提交；但原 `gh release view` 逻辑会再次遇到本次入口失败风险。
+- **遗留问题：** 上传修复、重新手动运行 `v26.10.21`，再根据后续首次真正运行的补丁/编译日志处理兼容性错误；防止实验阶段重复构建同一 tag 的持久状态机制另行设计。
 
 ### 2026-10-29 — 公开仓库命名、中文首页与发布指引
 
