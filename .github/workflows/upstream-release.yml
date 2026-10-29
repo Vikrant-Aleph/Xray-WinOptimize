@@ -1,25 +1,28 @@
-name: Xray-WinOptimize experimental build
+name: Xray-WinOptimize Portable (latest upstream)
+
 on:
   schedule:
     - cron: '21 */6 * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: 'Optional upstream tag; leave empty for latest published release (including prereleases)'
+        description: '留空使用 Xray 最新 Release（包含预发布）；填写 vXX.X.X 可指定版本'
         required: false
         default: ''
         type: string
+
 permissions:
   contents: write
 concurrency:
-  group: xray-experimental-release
+  group: xray-winopt-portable-release
   cancel-in-progress: false
+
 jobs:
   patch-test-build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Determine upstream tag and check idempotence
+      - name: Select upstream release and check duplicate publication
         id: upstream
         shell: pwsh
         env:
@@ -34,63 +37,60 @@ jobs:
           }
           $tag = $env:REQUESTED_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) {
-            # Both manual and scheduled runs use the newest published upstream release.
-            # Include prereleases (but not drafts), ordered by publication time.
-            # Use raw JSON instead of Invoke-RestMethod's non-enumerating
-            # array pipeline; selection is tested independently in Python.
             $response = Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100' -Headers $headers -ErrorAction Stop
-            $releaseJson = Join-Path $env:RUNNER_TEMP 'xray-upstream-releases.json'
-            Set-Content -LiteralPath $releaseJson -Value $response.Content -Encoding utf8 -NoNewline
-            $tag = python scripts/select_latest_release.py $releaseJson
-            if ($LASTEXITCODE -ne 0) { throw "Could not select latest upstream release (exit $LASTEXITCODE)" }
-            if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No published upstream Xray releases found' }
-            Write-Host "Using latest upstream published release: $tag (prereleases included)"
-          } else {
-            Write-Host "Using manually specified upstream release: $tag"
+            $jsonPath = Join-Path $env:RUNNER_TEMP 'xray-upstream-releases.json'
+            Set-Content -LiteralPath $jsonPath -Value $response.Content -Encoding utf8 -NoNewline
+            $tag = python scripts/select_latest_release.py $jsonPath
+            if ($LASTEXITCODE -ne 0) { throw "Upstream release selector failed (exit $LASTEXITCODE)" }
+            if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No published Xray release found' }
           }
           $tag = $tag.Trim()
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unexpected upstream tag $tag" }
-          $release = "$tag-winrecv-experimental"
-          Write-Host "Selected upstream tag: $tag"
-          Write-Host "Checking project release tag: $release"
-
-          # A missing release is expected on a new repository. GitHub returns 404;
-          # do not use `gh release view` here: native-command exit code 1 can abort pwsh.
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unsupported upstream tag: $tag" }
+          $release = "$tag-winopt-portable"
+          Write-Host "Selected upstream tag: $tag (latest includes prereleases)"
+          Write-Host "Checking portable release: $release"
           $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/releases/tags/$release"
           $check = Invoke-WebRequest -Method Get -Uri $uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
           switch ([int]$check.StatusCode) {
-            200 { $exists = 'true';  Write-Host 'Experimental release already exists: skipping duplicate build.' }
-            404 { $exists = 'false'; Write-Host 'Experimental release not found (HTTP 404): proceeding with build.' }
-            default { throw "Cannot check experimental release: HTTP $($check.StatusCode), $uri" }
+            200 { $exists = 'true'; Write-Host 'Release already exists; skipping duplicate build.' }
+            404 { $exists = 'false'; Write-Host 'Release not published; starting build.' }
+            default { throw "Cannot check portable release: HTTP $($check.StatusCode)" }
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "release=$release" >> $env:GITHUB_OUTPUT
           "exists=$exists" >> $env:GITHUB_OUTPUT
-      - name: Clone exact upstream tag
+      - name: Fetch exact upstream Xray release
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
           git clone --depth 1 --branch '${{ steps.upstream.outputs.tag }}' https://github.com/XTLS/Xray-core.git xray-src
+          if ($LASTEXITCODE -ne 0) { throw 'git clone failed' }
           git -C xray-src rev-parse HEAD | Out-File upstream-commit.txt
       - uses: actions/setup-go@v5
         if: steps.upstream.outputs.exists != 'true'
         with:
           go-version-file: xray-src/go.mod
           cache: false
-      - name: Test controller and Windows adapter
+      - name: Test portable policy and patcher
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
-          go test ./recvwindow
-          go build ./adapter
+          go test ./portable ./recvwindow
+          if ($LASTEXITCODE -ne 0) { throw 'Go unit tests failed' }
+          go build ./portable
+          if ($LASTEXITCODE -ne 0) { throw 'Portable Windows module build failed' }
           python -m unittest discover -s tests -v
-      - name: Apply source-level patch (fail on incompatible code)
+          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed' }
+      - name: Apply portable patch to Xray TCP dialer
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
-          python patch/apply.py xray-src
-          gofmt -w xray-src/main/distro/all/all.go xray-src/proxy/tun/stack.go xray-src/proxy/tun/tcp_lightweight.go xray-src/proxy/tun/winpacket_adapter_windows.go xray-src/proxy/tun/dialer_experimental_windows.go xray-src/proxy/tun/recvwindow_adaptive.go
-      - name: Compile complete Xray (Windows amd64)
+          python patch/apply_portable.py xray-src
+          if ($LASTEXITCODE -ne 0) { throw 'Patch incompatible with upstream release; stop' }
+          gofmt -w xray-src/transport/internet/system_dialer.go
+          Get-ChildItem xray-src/transport/internet/winopt_*.go | ForEach-Object { gofmt -w $_.FullName }
+          if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
+      - name: Compile complete portable Xray Windows amd64
         if: steps.upstream.outputs.exists != 'true'
         working-directory: xray-src
         shell: pwsh
@@ -99,30 +99,33 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: '0'
         run: |
-          go build -trimpath -buildvcs=false -o ../xray-winrecv-experimental.exe ./main
-      - name: Pack build + source identification
+          go build -trimpath -buildvcs=false -o ../xray-winopt-portable.exe ./main
+          if ($LASTEXITCODE -ne 0) { throw 'Xray compile failed' }
+      - name: Prepare release ZIP
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item xray-winrecv-experimental.exe release/
+          Copy-Item xray-winopt-portable.exe release/
           Copy-Item upstream-commit.txt release/
           Copy-Item README.md release/README-project.zh-CN.md
           Copy-Item README.en.md release/README-project.en.md
           Copy-Item docs/TECHNICAL.md release/TECHNICAL.md
           Copy-Item docs/INSTALL-WINDOWS.md release/
-          Get-FileHash release/xray-winrecv-experimental.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
-          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip" -Force
-      - name: Upload build for testing even when publication is off
+          Copy-Item LICENSE release/
+          Get-FileHash release/xray-winopt-portable.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
+          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip" -Force
+      - name: Upload Windows portable artifact
         if: steps.upstream.outputs.exists != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: xray-winrecv-experimental-${{ steps.upstream.outputs.tag }}
-          path: xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip
-      - name: Publish prerelease only when repo owner opts in
-        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_EXPERIMENTAL_PRERELEASE == 'true'
+          name: xray-winopt-portable-${{ steps.upstream.outputs.tag }}
+          path: xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip
+      - name: Publish beta only after owner enables opt-in
+        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_PORTABLE_PRERELEASE == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Windows TCP Experimental' --notes 'Experimental build of Xray; requires an independently obtained WinDivert 2.2.2 DLL and signed driver; not yet validated for production. See README and upstream commit hash.'
+          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Xray-WinOptimize Portable' --notes 'Experimental portable Windows receiver-buffer policy: no driver or administrator privilege; not a replacement for Windows kernel TCP. See docs/TECHNICAL.md and validation status.'
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed' }

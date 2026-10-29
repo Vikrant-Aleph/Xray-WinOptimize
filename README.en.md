@@ -1,35 +1,21 @@
-# Xray-WinOptimize (Experimental)
+# Xray-WinOptimize
 
-An **unofficial experimental Windows TCP outbound backend** for Xray-core. It aims to use Xray's in-tree lightweight TCP/IP stack, WinDivert packet I/O and a Linux-inspired receive-window growth controller, rather than relying on native Windows TCP for Xray's ordinary outbound TCP dials.
+An **unofficial, experimental Windows performance fork of Xray-core**. Its default **Portable** mode uses Windows Winsock and a Linux-*inspired* receiver-buffer growth heuristic to help high-RTT/high-congestion traffic, without administrator privileges or an external driver.
 
-**Not production-ready. Full Xray compilation, Windows packet-driver interoperability and end-to-end connectivity have not yet been verified. Performance improvement is not established.**
+This is **not** a port of Linux TCP. It monitors RTT, incoming byte counts, and window/buffer state via `SIO_TCP_INFO`, then selectively uses `SO_RCVBUF`. Explicit receive-buffer settings alter Windows autotuning behavior. Full upstream Xray builds and real-world throughput remain to be validated.
 
-It is intended for **TCP outbound connections using Xray's default dialer**; existing SOCKS/HTTP proxy inbounds remain unchanged. It does not replace TCP for other Windows applications, nor does it modify UDP. Some outbound options and network paths are unsupported.
+### Download & run
 
-## Install an experimental build (Windows x64)
-
-1. Open this repository's **Actions** and download an artifact from a successful `Track upstream Xray release and build experimental TCP backend` run. **Releases** are only published if the repository owner explicitly enables experimental prereleases. Keep your official Xray executable for rollback.
-2. Extract `xray-winrecv-experimental.exe`. From the [official WinDivert v2.2.2 release](https://github.com/basil00/WinDivert/releases/tag/v2.2.2), obtain the matching x64 `WinDivert.dll` and signed `WinDivert64.sys`, and place them next to the executable. **The driver and DLL are not bundled.**
-3. Use your existing Xray config, remove any test `SO_RCVBUF` custom socket option, and start from an **Administrator PowerShell** (adjust config path):
+1. Open **Actions → Xray-WinOptimize Portable (latest upstream)** and run the workflow. Leave the version blank to track the latest published upstream Xray release, including prereleases.
+2. Download the successful artifact, unpack `xray-winopt-portable.exe`, and remove any earlier manual `SO_RCVBUF` custom socket option from your Xray configuration.
+3. Launch as a **normal user**, just like official Xray:
 
    ```powershell
-   $env:XRAY_EXPERIMENTAL_TCP_STACK = '1'
-   .\xray-winrecv-experimental.exe run -config .\config.json
+   .\xray-winopt-portable.exe run -config .\config.json
    ```
 
-4. Verify single-connection TCP and REALITY connectivity **before** attempting a speed test. This experimental packet driver may conflict with VPNs, firewalls and other network filters.
+Disable the optimization with `$env:XRAY_WINOPT_MODE='off'`. Set `$env:XRAY_WINOPT_LOG='1'` for diagnostic messages. The per-connection cap and overall buffer-request budget scale with system RAM; override them with `XRAY_WINOPT_MAX_MIB=1..64` and `XRAY_WINOPT_BUDGET_MIB=32..2048` (MiB).
 
-**Rollback:** stop experimental Xray, then run your saved official binary:
+The optional separate WinDivert-based TCP backend is an **experimental, privileged** research branch, not part of the default Portable executable.
 
-```powershell
-Remove-Item Env:\XRAY_EXPERIMENTAL_TCP_STACK -ErrorAction SilentlyContinue
-.\xray.exe run -config .\config.json
-```
-
-See [detailed Windows installation / source build](docs/INSTALL-WINDOWS.md).
-
-## Development and documentation
-
-The [technical design and change log](docs/TECHNICAL.md) documents architecture, exact source modifications, algorithm, packet adapter, compatibility risks, test status and handoff notes. **Every implementation, patch, workflow or installation-process change must update that document in the same pull request**; a CI documentation gate enforces the file-change requirement.
-
-[简体中文](README.md) · [Upstream Xray-core](https://github.com/XTLS/Xray-core) (this is an independent, unofficial project)
+Detailed architecture/change log: [docs/TECHNICAL.md](docs/TECHNICAL.md). Windows notes: [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md). Upstream: [XTLS/Xray-core](https://github.com/XTLS/Xray-core).

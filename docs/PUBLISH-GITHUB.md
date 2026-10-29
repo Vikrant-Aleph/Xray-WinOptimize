@@ -1,3 +1,15 @@
+# GitHub 发布与更新（2026-10-29：Portable 默认）
+
+仓库：[Vikrant-Aleph/Xray-WinOptimize](https://github.com/Vikrant-Aleph/Xray-WinOptimize)。将完整包里的 `Xray-WinOptimize/` **除 `.git` 之外**覆盖原工作目录，保留 `.github`；检查 `git status`，执行 `git add -A`、`git commit -m "Add default portable adaptive TCP receiver"`、`git push origin main`。
+
+**默认 Actions：** `Xray-WinOptimize Portable (latest upstream)`，手动版本留空即跟随上游最新 Release（包含预发布），每 6 小时自动检查。成功后从 Artifacts 下载 `xray-winopt-portable-v...`，不需要 WinDivert 或管理员权限。实验 WinDivert 后端转移到 `Xray-WinOptimize experimental WinDivert backend` 手动工作流；它不是普通用户下载入口。
+
+自动公开预发布默认关闭。等完整编译+Windows 真实联网+性能验证通过后，再设置 GitHub Actions 仓库变量 `ENABLE_PORTABLE_PRERELEASE=true`。此变量只对成功构建后的未来运行生效。源码与技术文档必须在同一次提交更新，`docs-check` CI 会检查。
+
+---
+
+## 旧版独立 TCP 栈发布流程（历史备份）
+
 # Xray-WinOptimize — GitHub 公开发布与持续更新
 
 ## 1. 公开发布源码

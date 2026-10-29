@@ -14,6 +14,7 @@ from pathlib import Path
 TECHNICAL = 'docs/TECHNICAL.md'
 CODE_PREFIXES = (
     'adapter/',
+    'portable/',
     'recvwindow/',
     'patch/',
     'scripts/',
