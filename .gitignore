@@ -1,0 +1,9 @@
+*.exe
+*.exe~
+*.zip
+*.orig
+*.log
+__pycache__/
+*.pyc
+xray-src/
+release/

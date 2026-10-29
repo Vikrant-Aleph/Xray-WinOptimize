@@ -1,0 +1,101 @@
+name: Xray-WinOptimize experimental build
+on:
+  schedule:
+    - cron: '21 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Specific upstream Xray tag (empty = latest release)'
+        required: false
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: xray-experimental-release
+  cancel-in-progress: false
+jobs:
+  patch-test-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine upstream tag and check idempotence
+        id: upstream
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          $tag = $env:REQUESTED_TAG
+          if (-not $tag) {
+            $releases = gh api 'repos/XTLS/Xray-core/releases?per_page=15' | ConvertFrom-Json
+            $latest = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
+            if (-not $latest) { throw 'No upstream releases found' }
+            $tag = $latest.tag_name
+          }
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unexpected upstream tag $tag" }
+          $release = "$tag-winrecv-experimental"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "release=$release" >> $env:GITHUB_OUTPUT
+          gh release view $release --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT }
+          else { "exists=false" >> $env:GITHUB_OUTPUT }
+      - name: Clone exact upstream tag
+        if: steps.upstream.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch '${{ steps.upstream.outputs.tag }}' https://github.com/XTLS/Xray-core.git xray-src
+          git -C xray-src rev-parse HEAD | Out-File upstream-commit.txt
+      - uses: actions/setup-go@v5
+        if: steps.upstream.outputs.exists != 'true'
+        with:
+          go-version-file: xray-src/go.mod
+          cache: false
+      - name: Test controller and Windows adapter
+        if: steps.upstream.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          go test ./recvwindow
+          go build ./adapter
+          python -m unittest discover -s tests -v
+      - name: Apply source-level patch (fail on incompatible code)
+        if: steps.upstream.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          python patch/apply.py xray-src
+          gofmt -w xray-src/main/distro/all/all.go xray-src/proxy/tun/stack.go xray-src/proxy/tun/tcp_lightweight.go xray-src/proxy/tun/winpacket_adapter_windows.go xray-src/proxy/tun/dialer_experimental_windows.go xray-src/proxy/tun/recvwindow_adaptive.go
+      - name: Compile complete Xray (Windows amd64)
+        if: steps.upstream.outputs.exists != 'true'
+        working-directory: xray-src
+        shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go build -trimpath -buildvcs=false -o ../xray-winrecv-experimental.exe ./main
+      - name: Pack build + source identification
+        if: steps.upstream.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item xray-winrecv-experimental.exe release/
+          Copy-Item upstream-commit.txt release/
+          Copy-Item README.md release/README-project.zh-CN.md
+          Copy-Item README.en.md release/README-project.en.md
+          Copy-Item docs/TECHNICAL.md release/TECHNICAL.md
+          Copy-Item docs/INSTALL-WINDOWS.md release/
+          Get-FileHash release/xray-winrecv-experimental.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
+          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip" -Force
+      - name: Upload build for testing even when publication is off
+        if: steps.upstream.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-winrecv-experimental-${{ steps.upstream.outputs.tag }}
+          path: xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip
+      - name: Publish prerelease only when repo owner opts in
+        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_EXPERIMENTAL_PRERELEASE == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winrecv-experimental.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Windows TCP Experimental' --notes 'Experimental build of Xray; requires an independently obtained WinDivert 2.2.2 DLL and signed driver; not yet validated for production. See README and upstream commit hash.'

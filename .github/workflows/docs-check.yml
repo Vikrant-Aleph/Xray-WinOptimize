@@ -1,0 +1,27 @@
+name: Require technical documentation for implementation changes
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  technical-doc-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check technical documentation update
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE_SHA"
+          else
+            BASE="$PUSH_BASE_SHA"
+          fi
+          python3 tests/check_technical_doc.py --base "$BASE" --head HEAD
+      - name: Run documentation policy tests
+        run: python3 -m unittest discover -s tests -p 'test_doc_policy.py' -v
