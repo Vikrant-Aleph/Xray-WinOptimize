@@ -20,7 +20,7 @@ git push -u origin main
 
 ## 2. 触发首次自动编译
 
-在仓库 **Actions** 页面找到 **Xray-WinOptimize experimental build**，选择 **Run workflow**，`upstream_tag` **默认留空**，直接点击运行便会查询并构建 **上游最新已发布的 Release**（包含预发布版本，排除草稿）；仅当你主动输入具体标签（例如 `v26.10.21`）时才固定构建该版本。定时运行也会自动查询最新发布。成功后到该次运行页面的 **Artifacts** 下载实验构建包；**尚未完成全链路验证，构建通过不等于可用**。
+在仓库 **Actions** 页面找到 **Xray-WinOptimize experimental build**，选择 **Run workflow**，`upstream_tag` **默认留空**，直接点击运行便会查询并构建 **上游最新已发布的 Release**（包含预发布版本，排除草稿）；仅当你主动输入具体标签（例如 `v26.10.21`）时才固定构建该版本。定时运行也会自动查询最新发布。自动选版改为用 `scripts/select_latest_release.py` 处理 GitHub API 的原始 JSON，并有 `tests/test_release_selector.py` 回归测试；异常响应会停止构建。成功后到该次运行页面的 **Artifacts** 下载实验构建包；**尚未完成全链路验证，构建通过不等于可用**。
 
 工作流会每 6 小时检查 Xray 上游 Release，发现新标签时尝试拉取源码、严格打补丁、运行测试并编译 Windows x64；不兼容则应失败而不发布。定时检查并非上游发布即刻触发；GitHub 可能延迟调度。
 

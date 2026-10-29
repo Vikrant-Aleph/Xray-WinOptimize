@@ -16,6 +16,7 @@ CODE_PREFIXES = (
     'adapter/',
     'recvwindow/',
     'patch/',
+    'scripts/',
     'tests/',
     '.github/workflows/',
 )

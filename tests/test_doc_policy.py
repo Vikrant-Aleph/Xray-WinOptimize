@@ -31,6 +31,9 @@ class DocGateTests(unittest.TestCase):
     def test_doc_only_allowed(self):
         self.assertTrue(doc_gate.evaluate(['docs/TECHNICAL.md'])[0])
 
+    def test_release_selector_change_requires_doc(self):
+        self.assertFalse(doc_gate.evaluate(['scripts/select_latest_release.py'])[0])
+
     def test_windows_separators_normalized(self):
         self.assertTrue(doc_gate.evaluate(['adapter\\packet_windows.go', 'docs\\TECHNICAL.md'])[0])
 

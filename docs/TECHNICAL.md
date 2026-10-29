@@ -101,6 +101,8 @@ transport/internet 的默认 TCP 拨号路径
 | `patch/apply.py` | 通过**严格字符串锚点**将改动应用到新鲜 Xray 源码树，并备份原文件 |
 | `patch/dialer_windows.go` | 编译为 `proxy/tun/dialer_experimental_windows.go` 的 Windows 拨号器 |
 | `.github/workflows/upstream-release.yml` | 定时／手动跟踪上游发布并 Windows amd64 构建 |
+| `scripts/select_latest_release.py` | 解析 GitHub Releases 原始 JSON，按发布时间选择最新发布版本 |
+| `tests/test_release_selector.py` | 对自动选版进行 API 响应模拟和命令行回归测试 |
 | `.github/workflows/docs-check.yml` | PR / push 文档同步检查；不等同技术审查 |
 | `tests/test_patcher.py` | 模拟上游源码，验证锚点、生成文件可 gofmt、重复打补丁拒绝 |
 | `tests/check_technical_doc.py` | 检查改动的文件集是否同时包含 `docs/TECHNICAL.md` |
@@ -317,7 +319,7 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 文件：`.github/workflows/upstream-release.yml`。
 
 1. 每 6 小时定时检查一次（UTC cron `21 */6 * * *`），也支持 `workflow_dispatch` 指定 `upstream_tag`。手动运行 `upstream_tag` 默认**空字符串**，与定时运行一样自动跟踪上游最新发布；填写具体 tag 才固定版本。
-2. 当 `upstream_tag` 为空（手动默认或定时运行）时，调用 GitHub REST API 列出 Xray Releases，排除 draft、包含 prerelease，按 `published_at` 倒序选择最新发布；只接受 `^v[0-9]+\.[0-9]+\.[0-9]+$` 形式的 tag，其他格式拒绝。提供非空 `upstream_tag` 时直接使用指定标签。API 请求出错会明确停止。
+2. 当 `upstream_tag` 为空（手动默认或定时运行）时，用 `Invoke-WebRequest` 获取 Xray Releases 原始 JSON（最多前 100 条），写入临时文件，再使用 `scripts/select_latest_release.py` 按 `published_at` 选择最近发布版本。排除 draft，包含 prerelease，只接受 `^v[0-9]+\.[0-9]+\.[0-9]+$` 格式；最新发布不符合此格式时**报错，不回退旧版**。非空 `upstream_tag` 使用指定标签。这样避免 `Invoke-RestMethod` 的 JSON 数组被作为单个管道对象传给 `Where-Object`，导致所有记录筛选失败。API 非数组、无有效发布记录、请求失败均停止。
 3. 通过 GitHub REST API `GET /repos/{owner}/{repo}/releases/tags/{tag}` 检查 `$tag-winrecv-experimental` Release。HTTP 200 表示已存在、跳过；HTTP 404 表示尚不存在、继续构建；其他响应按错误处理并显示状态码。不可直接用 `gh release view` 的退出码作不存在判断，因为 Windows Actions 的 `pwsh` 可能会在非零退出码时提前终止。**若只上传 Actions artifact、没有正式 Release，后续定时运行仍可能重复构建该上游版本。**
 4. `git clone --depth 1 --branch <tag>` 精确获取上游源码；记录 commit hash；按上游 `go.mod` 配置 Go 工具链。
 5. 运行控制器/适配层检查、模拟补丁器测试、应用补丁、`gofmt`、编译 Windows amd64 Xray。
@@ -325,13 +327,13 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 7. **默认不会创建 GitHub Release。** 只有仓库变量 `ENABLE_EXPERIMENTAL_PRERELEASE=true` 时才创建带 `--prerelease` 标记的 GitHub Release。
 8. 编译成功只说明代码可编译，不是实机网络通过；默认不应把公开预发布视为稳定发布。
 
-2026-10-29 首次真实 Actions 运行在版本/Release 检查步骤返回退出码 1，尚未下载上游源码；该步骤已修复，**新逻辑仍需下一次 Actions 运行确认**。全工程构建及联网验证尚未完成。
+2026-10-29 两次真实 Actions 运行均在版本选择／Release 检查步骤失败：首次是 `gh release view` 非零退出；第二次（Run 110724657760）是 `No published upstream Xray releases found`，原因是 `Invoke-RestMethod` 数组枚举行为。现已切换原始 JSON + Python 选版并补充测试，**修复后的在线 Actions 仍待验证**；全工程构建与联网验证未完成。
 
 ### 9.4 文档同步检查
 
 `.github/workflows/docs-check.yml` 在 push 和 pull request 时运行 `tests/check_technical_doc.py`，比较变更文件。
 
-判定范围：`adapter/`、`recvwindow/`、`patch/`、`tests/`、`go.mod`、`.github/workflows/`、`docs/INSTALL-WINDOWS.md` 等实现、测试和构建／安装相关路径。若其中任一文件改变，变更集必须同时包含 `docs/TECHNICAL.md`。纯 README 或纯技术文档调整不要求再次额外修改其他文件。
+判定范围：`adapter/`、`recvwindow/`、`patch/`、`scripts/`、`tests/`、`go.mod`、`.github/workflows/`、`docs/INSTALL-WINDOWS.md` 等实现、测试和构建／安装相关路径。若其中任一文件改变，变更集必须同时包含 `docs/TECHNICAL.md`。纯 README 或纯技术文档调整不要求再次额外修改其他文件。
 
 该检查只能**证明技术文档文件被同步修改**，不能证明描述与实现一致；代码审查时仍须核对变更记录是否具体准确。初次仓库创建和某些特殊 Git 历史范围需要额外判断，详见脚本注释。
 
@@ -350,7 +352,7 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 | VLESS / REALITY / Vision | **未验证** | 需要真实用户配置握手与数据校验 |
 | 高 RTT 下载能否优于固定 SO_RCVBUF | **未验证** | 需要控制条件下 A/B/A 测试 |
 | IPv6、VPN、多网卡、休眠恢复 | **未验证** | 覆盖测试与故障恢复测试 |
-| GitHub 定时构建与发布 | **首次运行失败，入口步骤已修复，待复验** | `logs_110717158087.zip` 中 `Determine upstream tag and check idempotence` 的 exit code 1；仍需成功运行的 Actions 日志 |
+| GitHub 定时构建与发布 | **两次入口失败，现已更新逻辑，待复验** | `logs_110717158087.zip`：旧 Release 检查失败；`logs_110724657760.zip`：JSON 数组未正确筛选；仍缺在线构建成功日志 |
 | 文档同步 CI | 新增，需要 GitHub 首次运行确认 | `tests/check_technical_doc.py` + `tests/test_doc_policy.py` |
 
 ### 10.2 高优先级风险
@@ -426,6 +428,16 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 - **回退方法：** 如何恢复此前版本。
 - **遗留问题：** 需要后续维护者继续做什么。
 ```
+
+### 2026-10-29 — 修复最新上游 Release 选择器（Run 110724657760）
+
+- **问题／目标：** 第二次 Actions 在 `Determine upstream tag and check idempotence` 报 `No published upstream Xray releases found`，实际未进入克隆／编译。根因是 `@(Invoke-RestMethod ...)` 输出的 JSON 数组不能按预期在 `Where-Object` 逐项枚举。
+- **涉及文件：** `.github/workflows/upstream-release.yml`、新增 `scripts/select_latest_release.py`、`tests/test_release_selector.py`、更新 `tests/check_technical_doc.py`、`tests/test_doc_policy.py`、本文件 §3/§9/§10/§13、`docs/PUBLISH-GITHUB.md`。
+- **行为变化：** 默认仍跟随上游最新 Release（含预发布、排除草稿）；工作流改用 `Invoke-WebRequest` 下载 JSON 文本，然后由 Python `select_latest_release()` 逐项比较 `published_at`。手动输入版本仍可固定。非法或意外响应明确停止，不回退旧版；仓库自身的 HTTP 200/404 Release 查询不变。
+- **验证：** 根据本次日志确定失败点；新增针对数组、草稿、预发布、非数组 API 错误、未知新标签和 CLI 的单元测试；本地 Python 测试通过。真实 GitHub 在线请求、完整 Xray 构建和 WinDivert 收发仍待验证。
+- **兼容性与风险：** 依赖 runner 内 Python（现有测试已有同一依赖）；检查 GitHub API 前 100 条 Release；若最新 tag 改变命名格式，会安全失败。
+- **回退方法：** 回退本次工作流与脚本，但旧逻辑会恢复当前已知故障。
+- **遗留问题：** 再运行 Actions，确认进入克隆、源码补丁和编译，再根据实际日志继续修复。
 
 ### 2026-10-29 — 默认始终构建上游最新发布（手动、定时一致）
 

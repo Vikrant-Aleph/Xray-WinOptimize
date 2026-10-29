@@ -36,13 +36,14 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($tag)) {
             # Both manual and scheduled runs use the newest published upstream release.
             # Include prereleases (but not drafts), ordered by publication time.
-            $releases = @(Invoke-RestMethod -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30' -Headers $headers -ErrorAction Stop)
-            $latest = $releases |
-              Where-Object { -not $_.draft -and $_.published_at } |
-              Sort-Object -Property @{ Expression = { [datetimeoffset]$_.published_at }; Descending = $true } |
-              Select-Object -First 1
-            if (-not $latest) { throw 'No published upstream Xray releases found' }
-            $tag = $latest.tag_name
+            # Use raw JSON instead of Invoke-RestMethod's non-enumerating
+            # array pipeline; selection is tested independently in Python.
+            $response = Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100' -Headers $headers -ErrorAction Stop
+            $releaseJson = Join-Path $env:RUNNER_TEMP 'xray-upstream-releases.json'
+            Set-Content -LiteralPath $releaseJson -Value $response.Content -Encoding utf8 -NoNewline
+            $tag = python scripts/select_latest_release.py $releaseJson
+            if ($LASTEXITCODE -ne 0) { throw "Could not select latest upstream release (exit $LASTEXITCODE)" }
+            if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No published upstream Xray releases found' }
             Write-Host "Using latest upstream published release: $tag (prereleases included)"
           } else {
             Write-Host "Using manually specified upstream release: $tag"
