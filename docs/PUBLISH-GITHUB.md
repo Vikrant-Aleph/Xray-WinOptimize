@@ -1,5 +1,7 @@
 # GitHub 发布与更新（2026-10-30：Xray-WinOptimize 默认构建）
 
+**建议的 GitHub About 描述：** Windows 平台的 Xray-core TCP 性能优化项目，借鉴 Linux 接收缓冲区自动调谐的设计思路，旨在改善高延迟、拥堵网络下的代理性能。
+
 仓库：[Vikrant-Aleph/Xray-WinOptimize](https://github.com/Vikrant-Aleph/Xray-WinOptimize)。将完整包里的 `Xray-WinOptimize/` **除 `.git` 之外**覆盖原工作目录，保留 `.github`；检查 `git status`，执行 `git add -A`、`git commit -m "Improve Windows TCP receive performance"`、`git push origin main`。
 
 **默认 Actions：** `Xray-WinOptimize (latest upstream)`，手动版本留空即跟随上游最新 Release（包含预发布），每 6 小时自动检查。成功后从 Artifacts 下载 `xray-winopt-v...`，不需要 WinDivert 或管理员权限。实验 WinDivert 后端转移到 `Xray-WinOptimize experimental WinDivert backend` 手动工作流；它不是普通用户下载入口。
@@ -16,7 +18,7 @@
 
 在 https://github.com/new 创建名为 `Xray-WinOptimize` 的 **Public** 仓库。不要勾选生成 README、.gitignore 或许可证模板（先审查下述许可证问题）。
 
-**仓库简介：** Windows 平台上修改 TCP 协议栈的 Xray-core，支持 Linux 风格接收窗口自动调谐，旨在改善高延迟、拥堵网络下 Windows 平台的 Xray 代理性能。
+**仓库简介（适用于当前默认实现）：** Windows 平台的 Xray-core TCP 性能优化项目，借鉴 Linux 接收缓冲区自动调谐的设计思路，旨在改善高延迟、拥堵网络下的代理性能。
 
 将完整项目解压为 `Xray-WinOptimize` 目录，在该目录运行 PowerShell（替换 GitHub 用户名）：
 

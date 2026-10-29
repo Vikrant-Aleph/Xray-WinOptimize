@@ -17,8 +17,8 @@ func TestInitialGrowthIsDemandBasedAndNotOneMiB(t *testing.T) {
 		if i < 2 && got != 0 {
 			t.Fatalf("premature growth %d", got)
 		}
-		if i == 2 && got != 512*1024 {
-			t.Fatalf("expected calculated first increase to 512KiB, got %d", got)
+		if i == 2 && got != 640*1024 {
+			t.Fatalf("expected bounded first increase from steady demand, got %d", got)
 		}
 	}
 }
@@ -52,8 +52,8 @@ func TestNoAdvertisedWindowPressureGate(t *testing.T) {
 	c.Observe(sample(start.Add(200*time.Millisecond), 160, 200*1024, buf, buf))
 	// RcvWnd == RcvBuf. The old 70% gate would have discarded this sample.
 	n := c.Observe(sample(start.Add(1400*time.Millisecond), 160, 1600*1024, buf, buf))
-	if n <= buf || n > 2*buf {
-		t.Fatalf("expected demand-based growth with full advertised window, got %d", n)
+	if n <= buf || n > 4*buf {
+		t.Fatalf("expected demand-based growth with full advertised window within 4x cap, got %d", n)
 	}
 }
 
@@ -95,13 +95,13 @@ func TestLowDemandAfterProbingDoesNotExpandIndefinitely(t *testing.T) {
 	start := time.Unix(100, 0)
 	c.Observe(sample(start, 160, 100*1024, 256*1024, 256*1024))
 	c.Observe(sample(start.Add(200*time.Millisecond), 160, 180*1024, 256*1024, 256*1024))
-	if n := c.Observe(sample(start.Add(400*time.Millisecond), 160, 260*1024, 256*1024, 256*1024)); n != 512*1024 {
-		t.Fatalf("expected one capacity probe, got %d", n)
+	if n := c.Observe(sample(start.Add(400*time.Millisecond), 160, 260*1024, 256*1024, 256*1024)); n != 640*1024 {
+		t.Fatalf("expected one bounded capacity probe, got %d", n)
 	}
-	c.Applied(512*1024, start.Add(400*time.Millisecond))
+	c.Applied(640*1024, start.Add(400*time.Millisecond))
 	// Only 80KiB during the next full measurement cycle; one flat probe
 	// already happened, so don't keep doubling a low-demand connection.
-	if n := c.Observe(sample(start.Add(1600*time.Millisecond), 160, 340*1024, 512*1024, 512*1024)); n != 0 {
+	if n := c.Observe(sample(start.Add(1600*time.Millisecond), 160, 340*1024, 640*1024, 640*1024)); n != 0 {
 		t.Fatalf("repeated unproductive probe %d", n)
 	}
 }
@@ -128,11 +128,8 @@ func TestRTTPacedGrowthOnlyAfterRound(t *testing.T) {
 			t.Fatalf("sample %d changed buffer before RTT: %d", i, n)
 		}
 	}
-	if n := c.Observe(sample(start.Add(time.Second), 900, 700*1024, 256*1024, 128*1024)); n != 0 {
-		t.Fatalf("first complete RTT should not change buffer: %d", n)
-	}
-	if n := c.Observe(sample(start.Add(2*time.Second), 900, 1600*1024, 256*1024, 128*1024)); n != 512*1024 {
-		t.Fatalf("first adaptive increase should honor 2x cap: %d", n)
+	if n := c.Observe(sample(start.Add(time.Second), 900, 700*1024, 256*1024, 128*1024)); n != 1*winOptMiB {
+		t.Fatalf("first completed RTT should grow at most 4x when demand warrants: %d", n)
 	}
 }
 
@@ -144,8 +141,8 @@ func TestGenericGrowthWorksBeyondTwoMiB(t *testing.T) {
 	c.Applied(base, start)
 	c.Observe(sample(start.Add(200*time.Millisecond), 200, uint64(3*winOptMiB), base, base))
 	n := c.Observe(sample(start.Add(1600*time.Millisecond), 200, uint64(10*winOptMiB), base, base))
-	if n != 8*winOptMiB {
-		t.Fatalf("expected size-independent 4->8MiB growth, got %d", n)
+	if n != 16*winOptMiB {
+		t.Fatalf("expected size-independent 4->16MiB growth when demand warrants, got %d", n)
 	}
 }
 
@@ -173,6 +170,65 @@ func TestOverflowDoesNotWrapBelowApplied(t *testing.T) {
 	n := c.Observe(sample(start.Add(2*time.Second), 160, ^uint64(0)-1, winOptMiB, 256*1024))
 	if n > 64*winOptMiB {
 		t.Fatalf("overflow: %d", n)
+	}
+}
+
+// A burst can justify expanding after a *single* completed measurement RTT;
+// no need to spend an additional RTT at the Windows-default receive window.
+func TestOneHighDemandRTTCanStartFastRamp(t *testing.T) {
+	c := winOptNewController(8 * winOptMiB)
+	start := time.Unix(300, 0)
+	buf := uint32(256 * 1024)
+	if n := c.Observe(sample(start, 160, 0, buf, buf)); n != 0 {
+		t.Fatal(n)
+	}
+	if n := c.Observe(sample(start.Add(200*time.Millisecond), 160, 800*1024, buf, buf)); n != 1*winOptMiB {
+		t.Fatalf("high demand should permit 4x on first RTT, got %d", n)
+	}
+}
+
+// A supported fast-ramp request must still be separated from its predecessor
+// by 400 ms (or one RTT if longer), not an arbitrary 1-second pause.
+func TestGrowthCooldownUsesRTTOr400ms(t *testing.T) {
+	c := winOptNewController(16 * winOptMiB)
+	start := time.Unix(300, 0)
+	base := uint32(winOptMiB)
+	c.Observe(sample(start, 160, 0, base, base))
+	c.Applied(base, start)
+	if n := c.Observe(sample(start.Add(200*time.Millisecond), 160, 500*1024, base, base)); n != 0 {
+		t.Fatalf("growth before cooldown: %d", n)
+	}
+	n := c.Observe(sample(start.Add(400*time.Millisecond), 160, 1500*1024, base, base))
+	if n <= base || n > 4*base {
+		t.Fatalf("should permit growth at 400ms, got %d", n)
+	}
+	c.Applied(n, start.Add(400*time.Millisecond))
+	if again := c.Observe(sample(start.Add(600*time.Millisecond), 160, 2800*1024, n, n)); again != 0 {
+		t.Fatalf("cooldown must reset after successful growth, got %d", again)
+	}
+}
+
+func TestFastRampUsesDemandNotForcedFourfold(t *testing.T) {
+	c := winOptNewController(16 * winOptMiB)
+	start := time.Unix(300, 0)
+	base := uint32(winOptMiB)
+	c.Observe(sample(start, 160, 0, base, base))
+	c.Applied(base, start)
+	n := c.Observe(sample(start.Add(600*time.Millisecond), 160, 560*1024, base, base))
+	if n <= base || n >= 2*base {
+		t.Fatalf("moderate measured demand must not force 4x: %d", n)
+	}
+}
+
+func TestFastRampStillHonorsMaximum(t *testing.T) {
+	c := winOptNewController(2 * winOptMiB)
+	start := time.Unix(300, 0)
+	base := uint32(512 * 1024)
+	c.Observe(sample(start, 160, 0, base, base))
+	c.Applied(base, start)
+	n := c.Observe(sample(start.Add(600*time.Millisecond), 160, uint64(16*winOptMiB), base, base))
+	if n != 2*winOptMiB {
+		t.Fatalf("maximum must constrain fast ramp, got %d", n)
 	}
 }
 

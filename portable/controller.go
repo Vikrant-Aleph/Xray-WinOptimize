@@ -33,18 +33,17 @@ type winOptSample struct {
 }
 
 type winOptController struct {
-	maxBytes       uint32
-	last           winOptSample
-	ready          bool
-	roundStart     winOptSample
-	roundReady     bool
-	previousRound  uint64
-	activityRounds int
-	applied        uint32
-	lastChange     time.Time
-	lastProbe      time.Time
-	flatProbes     int
-	reorderHint    uint64
+	maxBytes      uint32
+	last          winOptSample
+	ready         bool
+	roundStart    winOptSample
+	roundReady    bool
+	previousRound uint64
+	applied       uint32
+	lastChange    time.Time
+	lastProbe     time.Time
+	flatProbes    int
+	reorderHint   uint64
 }
 
 const (
@@ -79,12 +78,14 @@ func winOptNewController(maxBytes uint32) winOptController {
 // measurement, so it is not used as a percentage-based growth gate.
 // A single bounded exploratory doubling can break a flat-rate feedback loop.
 // Growth is further limited by the Windows socket-layer memory budget.
+// Fast ramp: permit the first qualified RTT window to intervene, shorten
+// the adjustment cooldown, and accept up to 4x when *measured demand*
+// warrants it. The existing per-socket and process memory bounds remain.
 func (c *winOptController) Observe(s winOptSample) uint32 {
 	if s.At.IsZero() || s.RTT <= 0 || s.RcvBuf == 0 {
 		c.last = s
 		c.ready = true
 		c.roundReady = false
-		c.activityRounds = 0
 		return 0
 	}
 	if !c.ready {
@@ -100,7 +101,6 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 		c.roundStart = s
 		c.roundReady = true
 		c.previousRound = 0
-		c.activityRounds = 0
 		c.reorderHint = 0
 		return 0
 	}
@@ -124,21 +124,20 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 	}
 	c.roundStart = s
 	if bytesThisRound < winOptMinRoundBytes {
-		c.activityRounds = 0
 		c.previousRound = bytesThisRound
 		return 0
 	}
-	c.activityRounds++
 
-	// The first intervention must still exclude short and very low RTT flows.
+	// The first intervention still excludes tiny and very low-RTT flows.
+	// One completed, sufficiently active RTT window is enough to evaluate demand.
 	// Once active, use exactly the same demand estimator as for later growth;
 	// there are no fixed-size 1 MiB / 2 MiB special cases.
 	if c.applied == 0 {
-		if s.RTT < winOptMinProbeRTT || s.BytesIn < winOptProbeBytes || c.activityRounds < 2 {
+		if s.RTT < winOptMinProbeRTT || s.BytesIn < winOptProbeBytes {
 			c.previousRound = bytesThisRound
 			return 0
 		}
-	} else if s.At.Sub(c.lastChange) < maxDuration(2*s.RTT, time.Second) {
+	} else if s.At.Sub(c.lastChange) < maxDuration(s.RTT, 400*time.Millisecond) {
 		c.previousRound = bytesThisRound
 		return 0
 	}
@@ -186,8 +185,9 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 	if target <= uint64(baseline) {
 		return 0
 	}
-	// Grow at most 2x on each decision, and never above the configured cap.
-	next := minU64(target, uint64(baseline)*2)
+	// Fast ramp: permit up to 4x only when the estimator requests it.
+	// The cap, quota and low-memory guard still bound every adjustment.
+	next := minU64(target, satMul(uint64(baseline), 4))
 	next = minU64(next, uint64(c.maxBytes))
 	if next <= uint64(baseline) {
 		return 0

@@ -1,12 +1,12 @@
 # Xray-WinOptimize 技术文档（交接主文档）
 
-> 版本：Windows TCP Optimization v3.2，2026-10-30。**此前版本有用户报告的性能提升；本次通用增长逻辑尚未在真实 Windows 测速验证，完整工作流构建仍需验证。** 默认工作模式仍是免管理员的 Windows Winsock；旧 WinDivert 独立协议栈保留为手动实验构建，见附录。每次修改代码、测试、补丁或 Actions，必须在同一次变更中更新本文和变更记录，`docs-check` 仅检查是否修改文档，不能代替审核文档内容。
+> 版本：Windows TCP Optimization v3.3（Fast Ramp），2026-10-30。**此前版本有用户报告的性能提升；本次加速增长尚未在真实 Windows 测速验证，完整工作流构建仍需验证。** 默认工作模式仍是免管理员的 Windows Winsock；旧 WinDivert 独立协议栈保留为手动实验构建，见附录。每次修改代码、测试、补丁或 Actions，必须在同一次变更中更新本文和变更记录，`docs-check` 仅检查是否修改文档，不能代替审核文档内容。
 
 ## 0. 目标及最重要的限制
 
-目标：接近 Linux 内核 `tcp_rcv_space_adjust()` 和 `tcp_rcvbuf_grow()` 的**增长原则**，同时保留 Windows Xray 的单 EXE、普通用户权限、零驱动、现有 SOCKS5/HTTP 和 VLESS/REALITY/Vision 配置。作用范围是经过 Xray **默认 TCP 系统拨号器**建立的出站连接，**不包括整台 Windows 系统的 TCP，也不保证覆盖第三方自定义拨号器**。
+目标：**借鉴** Linux 内核 `tcp_rcv_space_adjust()` 和 `tcp_rcvbuf_grow()` 的增长设计思路，开发独立的 Windows Socket 接收缓冲区增长策略，同时保留 Windows Xray 的单 EXE、普通用户权限、零驱动、现有 SOCKS5/HTTP 和 VLESS/REALITY/Vision 配置。作用范围是经过 Xray **默认 TCP 系统拨号器**建立的出站连接，**不包括整台 Windows 系统的 TCP，也不保证覆盖第三方自定义拨号器**。
 
-**无法完整移植 Linux：** Linux 用 `copied_seq` / 接收队列进度计算“应用每接收 RTT 已读多少”，以 `rcv_rtt_est`、实时乱序队列跨度、`sk_rmem_alloc` 和系统 TCP 内存压力进行决策。Windows `SIO_TCP_INFO` 只暴露 `BytesIn`（TCP 层接收字节）、`RttUs`（发送方向估计 RTT）、累计 `BytesReordered`、`RcvWnd` 和 `RcvBuf`；这些**不是等价内核变量**。用户态不能控制 TCP 内核 ACK/SACK、窗口通告实现和 skb 内存记账。显式 `SO_RCVBUF` 会改变/停止 Windows 该 Socket 的原生接收窗口自动调谐；之后本控制器接管的是**缓冲区配置请求**，不是 Windows 内核窗口算法。
+**设计边界（不是 Linux 内核算法移植）：** Linux 用 `copied_seq` / 接收队列进度计算“应用每接收 RTT 已读多少”，以 `rcv_rtt_est`、实时乱序队列跨度、`sk_rmem_alloc` 和系统 TCP 内存压力进行决策。Windows `SIO_TCP_INFO` 只暴露 `BytesIn`（TCP 层接收字节）、`RttUs`（发送方向估计 RTT）、累计 `BytesReordered`、`RcvWnd` 和 `RcvBuf`；这些**不是等价内核变量**。用户态不能控制 TCP 内核 ACK/SACK、窗口通告实现和 skb 内存记账。显式 `SO_RCVBUF` 会改变/停止 Windows 该 Socket 的原生接收窗口自动调谐；之后本控制器接管的是**缓冲区配置请求**，不是 Windows 内核窗口算法。
 
 本版不再把固定 2 MiB 或 8 MiB 说成 Linux 默认值。Linux `tcp_moderate_rcvbuf` 默认启用、上限由 `tcp_rmem[2]` 控制，随内存条件变化；Windows 模拟采取自己的安全参数。引用：
 
@@ -14,12 +14,14 @@
 - Linux TCP sysctl： https://kernel.org/doc/html/latest/networking/ip-sysctl.html
 - Windows `SIO_SET_COMPATIBILITY_MODE` 与 SO_RCVBUF： https://learn.microsoft.com/en-us/windows/win32/winsock/sio-set-compatibility-mode
 
+**对外术语规范：** README、GitHub About、Release 和项目介绍统一使用“借鉴 Linux TCP 接收缓冲区自动调谐的设计思路”，不得使用“支持 Linux 风格自动调谐”“移植 Linux TCP 调谐算法”“使用 Linux TCP 栈”等可能暗示等价实现的描述。`Linux-inspired` 仅作为历史源码注释或历史版本称呼；技术说明必须明确 Windows `SO_RCVBUF` 与 Linux 内核窗口算法的差异。
+
 ## 1. 源码改动对应表
 
 | 项目文件 | 具体职责 |
 | --- | --- |
-| `portable/controller.go` | 时间戳实验参数解析；RTT 周期测量；Linux 风格 2 倍基础量 + 趋势增长；有界乱序提示、通用一次性试探扩容和资源限制；不使用 RcvWnd 百分比门槛及固定容量特例 |
-| `portable/controller_test.go` | 首次按需求增长、短流、低 RTT、RTT 周期、满通告窗口仍扩容、超过 2 MiB 通用增长、冷却/上限/溢出、旧环境变量不影响算法等回归测试 |
+| `portable/controller.go` | 时间戳实验参数解析；RTT 周期测量；借鉴 Linux 思路的 2 倍基础量 + 趋势增长；有界乱序提示、通用一次性试探扩容和资源限制；v3.3 首次一个完整活跃 RTT 周期即可介入、调整间隔 `max(RTT,400ms)`、单次最多四倍；不使用 RcvWnd 百分比门槛及固定容量特例 |
+| `portable/controller_test.go` | 首次按需求增长（含单 RTT 快速介入）、短流、低 RTT、RTT 周期、满通告窗口仍扩容、400ms 冷却、按需四倍上限、超过 2 MiB 通用增长、冷却/上限/溢出、旧环境变量不影响算法等回归测试 |
 | `portable/quota.go`、`portable/quota_test.go` | 并发安全的进程级 Socket 请求预算，成功申请、增额、回退、关闭释放 |
 | `portable/socket_windows.go` | 可选连接级 TCP 时间戳（仅握手前，失败可回退）；Windows `SIO_TCP_INFO_v1`、`GlobalMemoryStatusEx`、SO_RCVBUF、生存期监控、低内存判断、域名/IP 缓存、并发拨号候选管理 |
 | `portable/socket_other.go` | 非 Windows 不启用任何优化，仅供其他平台编译；与 Windows 调用签名一致 |
@@ -29,7 +31,7 @@
 | `docs/INSTALL-WINDOWS.md` | 用户操作、开关、默认内存上限与预算、回退 |
 | `docs/TECHNICAL.md` | 实现事实、设计取舍、验证状态、变更历史（必须随代码同步） |
 
-## 2. Linux 风格 RTT 窗口测量
+## 2. 借鉴 Linux 设计的 RTT 周期测量
 
 `winOptController.Observe` 接收的 `BytesIn` 是累计值。维护上一采样及上个**测量 RTT 周期**的基线，而不是按固定 350ms 直接算瞬时速度。观察调用按 200ms 定时；每次测量周期至少为 `max(RttUs, 100ms)`。只在周期累计字节足够时参与增长决策。
 
@@ -37,9 +39,9 @@
 - Windows RTT 不等于 Linux 接收 RTT；使用 100ms 最小周期减轻极低 RTT 下的采样噪声。
 - 当单轮累计接收小于 32 KiB、采样间隔异常、字节计数重置时，跳过增长或重置趋势状态。
 
-## 3. Linux 风格增长公式（受限近似）
+## 3. 借鉴 Linux 设计的增长公式（Windows 自定义近似）
 
-参考 Linux 当前 `tcp_rcvbuf_grow` 的基本意图：基础目标为 **2 倍当前 RTT 交付字节数**，并为同比上一 RTT 的增长留出额外空间。
+借鉴 Linux 当前 `tcp_rcvbuf_grow` 的设计意图，但以下系数、门槛和扩容规则属于本项目自己的 Windows 实现：基础目标为 **2 倍当前 RTT 交付字节数**，并为同比上一 RTT 的增长留出额外空间。
 
 ```text
 current = 当前测量周期收到的 TCP 字节数
@@ -54,9 +56,9 @@ suggested = 1.25 × (base + trend + bounded_reorder_hint)
 
 其中 `bounded_reorder_hint` 为最近周期 `BytesReordered` 累计量增量（最多 256 KiB）。它**不等于实时乱序队列跨度**，故只能起有界预留提示的作用。`1.25` 是 Windows `SO_RCVBUF` 请求与实际通告窗口/内存空间缺乏 Linux skb 换算时采用的工程保守系数，**不是 Linux 内核常数**。
 
-单次调整最多增长两倍，按 64 KiB 对齐；先前成功设置后的调整仍需间隔 `max(2×RTT, 1s)`。增长采用**估算需求与当前缓冲区大小的比较**，不再使用 `RcvWnd < 0.7 × applied` 之类的百分比门槛：`RcvWnd` 是通告窗口，既不是当前缓冲区占用率，也不能单凭它判断是否达到路径 BDP。所有整数乘法采用饱和运算，防止溢出。
+v3.3 单次调整在估算需求充分时最多增长**四倍**（不是强制四倍），按 64 KiB 对齐；先前成功设置后的调整间隔改为 `max(RTT, 400ms)`。增长采用**估算需求与当前缓冲区大小的比较**，不再使用 `RcvWnd < 0.7 × applied` 之类的百分比门槛：`RcvWnd` 是通告窗口，既不是当前缓冲区占用率，也不能单凭它判断是否达到路径 BDP。所有整数乘法采用饱和运算，防止溢出。
 
-**统一的首次和后续扩容：** 初次不立即覆盖 Windows 的自动调谐；仍保留首次干预所需的轻量筛选（RTT ≥40ms、累计接收 ≥128KiB、连续两个活跃 RTT 测量周期，每周期至少 32KiB），但**不再指定首次必设 1 MiB**，也不再以 Windows 当前 `RcvBuf <768KiB` 作为单独门槛。通过筛选后，首次与后续均执行同一公式：
+**统一的首次和后续扩容：** 初次不立即覆盖 Windows 的自动调谐；仍保留首次干预所需的轻量筛选（RTT ≥40ms、累计接收 ≥128KiB、**至少一个完整活跃 RTT 测量周期**，该周期接收 ≥32KiB），但**不再指定首次必设 1 MiB**，也不再以 Windows 当前 `RcvBuf <768KiB` 作为单独门槛。通过筛选后，首次与后续均执行同一公式：
 
 ```text
 baseline = max(当前 Windows RcvBuf, 补丁上一次成功设置的 SO_RCVBUF)
@@ -73,12 +75,12 @@ trend    = current > previous 且 previous > 0 时的增长补偿，否则为 0
 target = 1.25 × (base + min(周期乱序字节计数增量, 256KiB))
 若 target <= baseline：不调整
 否则：
-    next = min(target, 2 × baseline, 单连接上限)
+    next = min(target, 4 × baseline, 单连接上限)
     next = 向上对齐 64KiB
     若 next > baseline 且通过进程级预算和低内存检查：设置 SO_RCVBUF(next)
 ```
 
-这里**没有固定为 1 MiB 或 2 MiB 的路径**。探索步骤用当前缓冲区的倍数表示，适用于 128KiB、512KiB、4MiB 等任何规模；当观测到接收量明显增长时重新允许一次探索，而平稳低吞吐数据不会持续无条件翻倍。探索前至少已接收一个当前缓冲区的数据量，这是一条按当前容量归一化的短流保护条件，而不是新引入某个固定 MiB 门槛。首次介入也受到 2 倍上限和预算限制；已有目标的缓存仍可在后续连接握手前设置之前学到的容量。
+这里**没有固定为 1 MiB 或 2 MiB 的路径**。探索步骤用当前缓冲区的倍数表示，适用于 128KiB、512KiB、4MiB 等任何规模；当观测到接收量明显增长时重新允许一次探索，而平稳低吞吐数据不会持续无条件翻倍。探索前至少已接收一个当前缓冲区的数据量，这是一条按当前容量归一化的短流保护条件，而不是新引入某个固定 MiB 门槛。首次介入也受到 4 倍上限和预算限制；已有目标的缓存仍可在后续连接握手前设置之前学到的容量。
 
 这项改变旨在让“接收窗口保持很大但仍不足以支撑 BDP”的连接不再被 70% 门槛错误拦截。代价是部分原本被旧门槛压制的连接会更早要求缓冲区、并可能导致不必要的 `setsockopt`；因此仍保留短流筛选、活动量要求、试探次数限制、冷却和预算，**暂不声称对所有网络一定更快**。
 
@@ -125,7 +127,7 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 ## 8. 当前验证状态
 
 - 用户报告：Windows 自适应版下载约 50 Mbps、手动固定 SO_RCVBUF=2 MiB 约 80 Mbps、Android 约 100 Mbps。不同客户端或不同时间的速率不足以单独证明 TCP 接收窗口是唯一瓶颈；当前没有同一轮逐连接调节日志、也不能据此推断 TCP 时间戳实验开关的收益。
-- v3.2 当前离线验证范围：通用控制器单测（统一首轮/后续计算、满通告窗口增长、容量扩展与内存上限、低流量与大缓冲区小流量过滤）、`go test ./portable ./recvwindow`、Windows amd64 `go build ./portable`、Python 补丁测试；真实 Windows 行为仍需验证。
+- v3.3 当前离线验证范围：通用控制器单测（含一个活跃 RTT 快速介入、400ms 冷却、需求驱动 4 倍单次上限、满通告窗口增长、容量扩展与内存上限、低流量过滤）、`go test ./portable ./recvwindow`、`go test -race ./portable ./recvwindow`、Windows amd64 `go build ./portable`、22 项 Python 补丁及仓库测试；真实 Windows 行为仍需验证。
 - 尚未验证：v3.2 通用增长策略在真实 Xray 中是否提速、最新真实 Xray 完整源码编译、新版时间戳设置在 Windows 11 的有效性；`GlobalMemoryStatusEx` / `SIO_TCP_INFO` 的完整边界行为、IPv4/IPv6 Happy Eyeballs、短连接／断线后的预算释放、VLESS+REALITY+Vision 握手及实测速度。
 - 风险：Linux 原生语义不可完全移植、`BytesIn` 作为应用读取量替身可能偏差较大、较长连接的持续轮询有额外开销、Windows 设置 SO_RCVBUF 后可能出现无法再缩小的限制、内存预算并非实际内存使用量、不同网络拥堵下策略可能误判。
 - 验收建议：在相同网络环境比较原版默认、原版固定 1MiB、本版自适应优化，观察 CPU/内存/并发以及测速下载速度；不应宣称已超过 Linux 或已修复 Windows 内核。
@@ -133,6 +135,24 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 ## 9. 维护规则与逐次变更记录
 
 每次提交修改任何实现／测试／工作流／安装方式时，**同一提交范围内更新本文的相关章节和本节**。README 只描述用途、安装及重要风险。
+
+### 2026-10-30 — 项目术语校正：明确为“借鉴 Linux 设计”
+
+- **原因：** 当前 Windows 默认实现仍使用 Winsock 与 `SO_RCVBUF`；RTT 代理量、增长系数、阈值、资源预算及调用方式均是本项目独立实现，不具备 Linux 内核相同的调谐语义。将项目宣传为“支持 Linux 风格接收窗口自动调谐”容易造成对兼容性、移植程度和性能效果的误解。
+- **修改文件：** `README.md`、`README.en.md`、`docs/PUBLISH-GITHUB.md`、`docs/INSTALL-WINDOWS.md`、`docs/TECHNICAL.md`。
+- **行为变化：** 无。这是纯文档和对外描述修订，不改变连接、扩容、测试与构建工作流。
+- **验证：** 检查当前公开介绍和安装文档没有“支持 Linux 风格”承诺；继续保留原实现边界及历史版本记录。
+- **回退：** 不涉及运行时回退；如修改此术语规范，应同步审查所有公开文档。
+
+### 2026-10-30 — v3.3：Fast Ramp——放宽首次介入、冷却及单步增长节奏
+
+- **目的：** 反馈 v3.2 速度仍未达到用户此前手动指定接收缓冲区时的水平。在不引入固定 1/2 MiB 分支的前提下，减少短时大流量连接早期被 Windows 小窗口限制的时间。
+- **涉及文件：** `portable/controller.go`（修改首次介入、调节冷却和单次增长上限）、`portable/controller_test.go`（更新既有语义并添加快速介入、400ms 冷却、按需求增长、内存上限等测试）、`docs/TECHNICAL.md`（此技术说明及记录）、`docs/INSTALL-WINDOWS.md`（用户行为说明）。拨号器、WinDivert 适配器、配置、工作流没有变化。
+- **增长逻辑：** 首次介入只需完成**一个**满足活动量要求的 RTT 测量周期，仍需 RTT≥40ms、累计收到至少 128KiB 且本周期至少 32KiB；之后增长冷却从 `max(2×RTT,1秒)` 降至 `max(RTT,400ms)`；单步上限从 `min(target,2×baseline,cap)` 改为 `min(target,4×baseline,cap)`。这里的四倍仅允许**估计需求确实达到**时请求较大值，不是逢连接就四倍扩容。仍按 64KiB 对齐。
+- **保持不变：** 200ms 采样、`max(RTT,100ms)` 计量周期、RTT 字节/趋势/乱序提示计算公式、通用有限的平稳期探索、无 70% 通告窗口门槛、无固定大小探测、每连接上限、进程预算、低内存保护、256 监测协程限额、10 分钟预握手目标缓存及用户显式 `SO_RCVBUF` 优先。
+- **风险：** 大量高吞吐连接可能更早锁定较大的 `SO_RCVBUF`，使 Windows 原生自动调谐更早退出，增加请求预算和内存压力；Winsock 实际分配不等于请求数；更快增长不保证更高吞吐或更优并发公平性。默认全局应用于 Xray 默认 TCP 出站，应先以可回退的实验二进制验证。
+- **验证：** 当前在独立仓库运行 Go 单测、race 检查、Python 单测及 Windows x64 交叉编译均通过；完整上游 Xray 最新版本构建与 Windows/REALITY/性能对照尚未经验证。
+- **回退：** 可执行文件回退上一版 v3.2；`XRAY_WINOPT_MODE=off` 关闭**全部**优化（不是仅关闭 Fast Ramp）。本版没有另设专门的激进模式开关。
 
 ### 2026-10-30 — v3.2：取消 70% 窗口压力门槛，统一需求驱动增长
 

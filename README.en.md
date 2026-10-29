@@ -1,8 +1,8 @@
 # Xray-WinOptimize
 
-An unofficial Windows performance optimization project for Xray-core. It implements Linux-inspired receive-buffer growth for high-latency, congested TCP outbound connections.
+An unofficial Windows performance optimization project for Xray-core. It draws on Linux TCP receive-buffer autotuning design principles to implement its own adaptive receive-buffer growth policy for Windows TCP outbound connections.
 
-The default build uses Windows native TCP without requiring administrator privileges or extra network drivers. It does **not** replace the Windows TCP stack or guarantee a throughput gain in all environments. Experimental status.
+The default build uses Windows native TCP without requiring administrator privileges or extra network drivers. It does **not** port the Linux TCP stack, replicate the Linux kernel autotuning algorithm, or guarantee a throughput gain in all environments. Experimental status.
 
 ### Download and run
 
