@@ -8,63 +8,112 @@ import (
 func sample(at time.Time, ms int, bytes uint64, buf, wnd uint32) winOptSample {
 	return winOptSample{At: at, RTT: time.Duration(ms) * time.Millisecond, BytesIn: bytes, RcvBuf: buf, RcvWnd: wnd}
 }
-func TestHighRTTBulkProbe(t *testing.T) {
-	c := winOptNewController(2 * winOptMiB)
-	now := time.Now()
+
+func TestInitialGrowthIsDemandBasedAndNotOneMiB(t *testing.T) {
+	c := winOptNewController(8 * winOptMiB)
+	now := time.Unix(100, 0)
 	for i := 0; i < 3; i++ {
-		got := c.Observe(sample(now.Add(time.Duration(i)*350*time.Millisecond), 160, uint64(60+i*80)*1024, 256*1024, 128*1024))
+		got := c.Observe(sample(now.Add(time.Duration(i)*350*time.Millisecond), 160, uint64(100+i*90)*1024, 256*1024, 256*1024))
 		if i < 2 && got != 0 {
-			t.Fatalf("premature probe %d", got)
+			t.Fatalf("premature growth %d", got)
 		}
-		if i == 2 && got != winOptMiB {
-			t.Fatalf("expected probe,got %d", got)
+		if i == 2 && got != 512*1024 {
+			t.Fatalf("expected calculated first increase to 512KiB, got %d", got)
 		}
 	}
 }
-func TestLowRTTNeverProbes(t *testing.T) {
-	c := winOptNewController(2 * winOptMiB)
-	now := time.Now()
+
+func TestLowRTTDoesNotInterveneInitially(t *testing.T) {
+	c := winOptNewController(8 * winOptMiB)
+	now := time.Unix(100, 0)
 	for i := 0; i < 10; i++ {
 		if n := c.Observe(sample(now.Add(time.Duration(i)*350*time.Millisecond), 12, uint64(i)*100*1024, 256*1024, 128*1024)); n != 0 {
-			t.Fatalf("low RTT probe %d", n)
+			t.Fatalf("low RTT first growth %d", n)
 		}
 	}
 }
-func TestNoTinyFlowProbe(t *testing.T) {
-	c := winOptNewController(2 * winOptMiB)
-	now := time.Now()
+
+func TestNoTinyFlowIntervention(t *testing.T) {
+	c := winOptNewController(8 * winOptMiB)
+	now := time.Unix(100, 0)
 	for i := 0; i < 10; i++ {
 		if n := c.Observe(sample(now.Add(time.Duration(i)*350*time.Millisecond), 160, uint64(i)*2048, 256*1024, 128*1024)); n != 0 {
-			t.Fatalf("tiny flow probe %d", n)
+			t.Fatalf("tiny flow increase %d", n)
 		}
 	}
 }
-func TestPressureAndCeiling(t *testing.T) {
-	c := winOptNewController(2 * winOptMiB)
-	now := time.Now()
-	for i := 0; i < 3; i++ {
-		c.Observe(sample(now.Add(time.Duration(i)*350*time.Millisecond), 160, uint64(60+i*200)*1024, 256*1024, 128*1024))
-	}
-	c.Applied(winOptMiB, now.Add(700*time.Millisecond))
-	// Pressure sustained after cooldown, BDP close to 1 MiB.
-	got := c.Observe(sample(now.Add(2*time.Second), 160, 4*1024*1024, winOptMiB, 512*1024))
-	if got != 2*winOptMiB {
-		t.Fatalf("expected 2MiB, got %d", got)
-	}
-	c.Applied(got, now.Add(2*time.Second))
-	got = c.Observe(sample(now.Add(4*time.Second), 160, 8*1024*1024, 2*winOptMiB, 512*1024))
-	if got != 0 {
-		t.Fatalf("exceeded ceiling: %d", got)
+
+func TestNoAdvertisedWindowPressureGate(t *testing.T) {
+	c := winOptNewController(4 * winOptMiB)
+	start := time.Unix(100, 0)
+	buf := winOptMiB
+	c.Observe(sample(start, 160, 0, buf, buf))
+	c.Applied(buf, start)
+	c.Observe(sample(start.Add(200*time.Millisecond), 160, 200*1024, buf, buf))
+	// RcvWnd == RcvBuf. The old 70% gate would have discarded this sample.
+	n := c.Observe(sample(start.Add(1400*time.Millisecond), 160, 1600*1024, buf, buf))
+	if n <= buf || n > 2*buf {
+		t.Fatalf("expected demand-based growth with full advertised window, got %d", n)
 	}
 }
-func TestNoPressureNoMoreGrowth(t *testing.T) {
+
+func TestGrowthIsNotConditionedOnAdvertisedWindow(t *testing.T) {
+	start := time.Unix(100, 0)
+	var proposals []uint32
+	for _, wnd := range []uint32{64 * 1024, winOptMiB} {
+		c := winOptNewController(8 * winOptMiB)
+		c.Observe(sample(start, 160, 0, winOptMiB, wnd))
+		c.Applied(winOptMiB, start)
+		c.Observe(sample(start.Add(200*time.Millisecond), 160, 400*1024, winOptMiB, wnd))
+		proposals = append(proposals, c.Observe(sample(start.Add(1400*time.Millisecond), 160, 1500*1024, winOptMiB, wnd)))
+	}
+	if proposals[0] == 0 || proposals[0] != proposals[1] {
+		t.Fatalf("advertised window wrongly gated growth: %v", proposals)
+	}
+}
+
+func TestGrowthHonorsCooldownAndCap(t *testing.T) {
+	c := winOptNewController(2 * winOptMiB)
+	start := time.Unix(100, 0)
+	c.Observe(sample(start, 160, 0, winOptMiB, winOptMiB))
+	c.Applied(winOptMiB, start)
+	if n := c.Observe(sample(start.Add(200*time.Millisecond), 160, 512*1024, winOptMiB, winOptMiB)); n != 0 {
+		t.Fatalf("cooldown ignored: %d", n)
+	}
+	n := c.Observe(sample(start.Add(1400*time.Millisecond), 160, 4*1024*1024, winOptMiB, winOptMiB))
+	if n != 2*winOptMiB {
+		t.Fatalf("expected capped 2MiB growth, got %d", n)
+	}
+	c.Applied(n, start.Add(1400*time.Millisecond))
+	if n = c.Observe(sample(start.Add(3*time.Second), 160, 8*1024*1024, 2*winOptMiB, 2*winOptMiB)); n != 0 {
+		t.Fatalf("exceeded cap: %d", n)
+	}
+}
+
+func TestLowDemandAfterProbingDoesNotExpandIndefinitely(t *testing.T) {
 	c := winOptNewController(8 * winOptMiB)
-	now := time.Now()
-	c.Observe(sample(now, 160, 100*1024, 256*1024, 128*1024))
-	c.Observe(sample(now.Add(time.Second), 160, 300*1024, 256*1024, 128*1024))
-	c.Applied(winOptMiB, now.Add(time.Second))
-	if got := c.Observe(sample(now.Add(3*time.Second), 160, uint64(3*winOptMiB), winOptMiB, winOptMiB)); got != 0 {
-		t.Fatalf("grew without pressure %d", got)
+	start := time.Unix(100, 0)
+	c.Observe(sample(start, 160, 100*1024, 256*1024, 256*1024))
+	c.Observe(sample(start.Add(200*time.Millisecond), 160, 180*1024, 256*1024, 256*1024))
+	if n := c.Observe(sample(start.Add(400*time.Millisecond), 160, 260*1024, 256*1024, 256*1024)); n != 512*1024 {
+		t.Fatalf("expected one capacity probe, got %d", n)
+	}
+	c.Applied(512*1024, start.Add(400*time.Millisecond))
+	// Only 80KiB during the next full measurement cycle; one flat probe
+	// already happened, so don't keep doubling a low-demand connection.
+	if n := c.Observe(sample(start.Add(1600*time.Millisecond), 160, 340*1024, 512*1024, 512*1024)); n != 0 {
+		t.Fatalf("repeated unproductive probe %d", n)
+	}
+}
+
+func TestFlatFlowDoesNotBlindlyDoubleALargeBuffer(t *testing.T) {
+	c := winOptNewController(16 * winOptMiB)
+	start := time.Unix(100, 0)
+	buf := uint32(4 * winOptMiB)
+	c.Observe(sample(start, 160, 0, buf, buf))
+	c.Observe(sample(start.Add(200*time.Millisecond), 160, 80*1024, buf, buf))
+	if n := c.Observe(sample(start.Add(400*time.Millisecond), 160, 160*1024, buf, buf)); n != 0 {
+		t.Fatalf("tiny transfer triggered pointless 4MiB buffer doubling: %d", n)
 	}
 }
 
@@ -80,36 +129,66 @@ func TestRTTPacedGrowthOnlyAfterRound(t *testing.T) {
 		}
 	}
 	if n := c.Observe(sample(start.Add(time.Second), 900, 700*1024, 256*1024, 128*1024)); n != 0 {
-		t.Fatalf("first complete RTT should not force changes: %d", n)
+		t.Fatalf("first complete RTT should not change buffer: %d", n)
 	}
-	if n := c.Observe(sample(start.Add(2*time.Second), 900, 1600*1024, 256*1024, 128*1024)); n != winOptMiB {
-		t.Fatalf("second busy RTT should probe: %d", n)
+	if n := c.Observe(sample(start.Add(2*time.Second), 900, 1600*1024, 256*1024, 128*1024)); n != 512*1024 {
+		t.Fatalf("first adaptive increase should honor 2x cap: %d", n)
 	}
 }
-func TestLongRTTGrowthMayExceedTwoMiB(t *testing.T) {
+
+func TestGenericGrowthWorksBeyondTwoMiB(t *testing.T) {
 	c := winOptNewController(16 * winOptMiB)
-	t0 := time.Unix(100, 0)
-	_ = c.Observe(sample(t0, 500, 0, 256*1024, 128*1024))
-	_ = c.Observe(sample(t0.Add(500*time.Millisecond), 500, 300*1024, 256*1024, 128*1024))
-	_ = c.Observe(sample(t0.Add(time.Second), 500, 600*1024, 256*1024, 128*1024))
-	c.Applied(winOptMiB, t0.Add(time.Second))
-	_ = c.Observe(sample(t0.Add(1500*time.Millisecond), 500, 1200*1024, winOptMiB, 256*1024)) // cooldown
-	n := c.Observe(sample(t0.Add(2500*time.Millisecond), 500, 2700*1024, winOptMiB, 256*1024))
-	if n <= winOptMiB {
-		t.Fatalf("expected post-RTT adaptive growth, got %d", n)
-	}
-	if n > 2*winOptMiB {
-		t.Fatalf("grew more than 2x: %d", n)
+	start := time.Unix(100, 0)
+	base := uint32(4 * winOptMiB)
+	c.Observe(sample(start, 200, 0, base, base))
+	c.Applied(base, start)
+	c.Observe(sample(start.Add(200*time.Millisecond), 200, uint64(3*winOptMiB), base, base))
+	n := c.Observe(sample(start.Add(1600*time.Millisecond), 200, uint64(10*winOptMiB), base, base))
+	if n != 8*winOptMiB {
+		t.Fatalf("expected size-independent 4->8MiB growth, got %d", n)
 	}
 }
+
+func TestGrowthIgnoresLegacyAggressiveFlag(t *testing.T) {
+	start := time.Unix(100, 0)
+	decide := func(env string) uint32 {
+		t.Setenv("XRAY_WINOPT_GROWTH", env)
+		c := winOptNewController(8 * winOptMiB)
+		c.Observe(sample(start, 160, 0, winOptMiB, winOptMiB))
+		c.Applied(winOptMiB, start)
+		c.Observe(sample(start.Add(200*time.Millisecond), 160, 400*1024, winOptMiB, winOptMiB))
+		return c.Observe(sample(start.Add(1400*time.Millisecond), 160, 1500*1024, winOptMiB, winOptMiB))
+	}
+	if a, b := decide(""), decide("aggressive"); a != b || a == 0 {
+		t.Fatalf("legacy setting should have no effect: default=%d legacy=%d", a, b)
+	}
+}
+
 func TestOverflowDoesNotWrapBelowApplied(t *testing.T) {
 	c := winOptNewController(64 * winOptMiB)
-	t0 := time.Unix(100, 0)
-	_ = c.Observe(sample(t0, 160, 0, winOptMiB, 256*1024))
-	c.Applied(winOptMiB, t0)
-	_ = c.Observe(sample(t0.Add(time.Second), 160, 100*1024, winOptMiB, 256*1024))
-	n := c.Observe(sample(t0.Add(2*time.Second), 160, ^uint64(0)-1, winOptMiB, 256*1024))
+	start := time.Unix(100, 0)
+	c.Observe(sample(start, 160, 0, winOptMiB, 256*1024))
+	c.Applied(winOptMiB, start)
+	c.Observe(sample(start.Add(time.Second), 160, 100*1024, winOptMiB, 256*1024))
+	n := c.Observe(sample(start.Add(2*time.Second), 160, ^uint64(0)-1, winOptMiB, 256*1024))
 	if n > 64*winOptMiB {
 		t.Fatalf("overflow: %d", n)
+	}
+}
+
+func TestTimestampOptionParsing(t *testing.T) {
+	cases := []struct {
+		value string
+		want  int
+		set   bool
+	}{
+		{"", 0, false}, {"auto", 0, false}, {"On", 1, true}, {"1", 1, true},
+		{"off", 0, true}, {" FALSE ", 0, true}, {"invalid", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := winOptTimestampValue(tc.value)
+		if got != tc.want || ok != tc.set {
+			t.Errorf("input %q => (%d, %v), want (%d, %v)", tc.value, got, ok, tc.want, tc.set)
+		}
 	}
 }

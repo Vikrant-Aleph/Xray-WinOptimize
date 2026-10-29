@@ -237,6 +237,32 @@ type winOptConnectState struct {
 
 // Control can run concurrently on IPv4 and IPv6 candidates. Never store one
 // global "current fd"; retain each pending socket and release losers on dial.
+// winOptApplyTCPOpts is an explicit opt-in experiment. It runs before the
+// TCP handshake, so a timestamp option can be negotiated on SYN. The option
+// affects only Xray TCP outbound sockets; it never modifies OS-wide settings.
+// Failure is logged but deliberately does not make the Xray dial fail.
+func winOptApplyTCPOpts(raw syscall.RawConn, network, address string) {
+	if !winOptEnabled(network) {
+		return
+	}
+	enabled, apply := winOptTimestampValue(os.Getenv("XRAY_WINOPT_TCP_TIMESTAMPS"))
+	if !apply {
+		return
+	}
+	const tcpTimestamps = 10 // ws2ipdef.h TCP_TIMESTAMPS
+	err := raw.Control(func(fd uintptr) {
+		sockErr := syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_TCP, tcpTimestamps, enabled)
+		if sockErr != nil {
+			winOptLog("tcp_timestamps failed target=%s enabled=%d err=%v", address, enabled, sockErr)
+		} else {
+			winOptLog("tcp_timestamps target=%s enabled=%d", address, enabled)
+		}
+	})
+	if err != nil {
+		winOptLog("tcp_timestamps raw control failed target=%s err=%v", address, err)
+	}
+}
+
 func winOptBeforeConnect(raw syscall.RawConn, network, address string, state *winOptConnectState) {
 	if !winOptEnabled(network) || winOptActiveWatchers.Load() >= 256 {
 		return

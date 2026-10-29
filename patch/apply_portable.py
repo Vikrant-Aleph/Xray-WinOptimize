@@ -27,6 +27,7 @@ def transform(source: str) -> str:
     source = replace_one(source,
         'dialer.Control = func(network, address string, c syscall.RawConn) error {',
         '''dialer.Control = func(network, address string, c syscall.RawConn) error {
+            winOptApplyTCPOpts(c, network, address)
             if !winOptExplicitRcvbuf(sockopt) { winOptBeforeConnect(c, network, address, &winOptAttempt) }''')
     source = replace_one(source,
         'dialer.Control = func(network, address string, c syscall.RawConn) error {',

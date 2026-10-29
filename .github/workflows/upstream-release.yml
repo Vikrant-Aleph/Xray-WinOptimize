@@ -1,4 +1,4 @@
-name: Xray-WinOptimize Portable (latest upstream)
+name: Xray-WinOptimize (latest upstream)
 
 on:
   schedule:
@@ -14,7 +14,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: xray-winopt-portable-release
+  group: xray-winopt-release
   cancel-in-progress: false
 
 jobs:
@@ -46,15 +46,15 @@ jobs:
           }
           $tag = $tag.Trim()
           if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unsupported upstream tag: $tag" }
-          $release = "$tag-winopt-portable"
+          $release = "$tag-winopt"
           Write-Host "Selected upstream tag: $tag (latest includes prereleases)"
-          Write-Host "Checking portable release: $release"
+          Write-Host "Checking release: $release"
           $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/releases/tags/$release"
           $check = Invoke-WebRequest -Method Get -Uri $uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
           switch ([int]$check.StatusCode) {
             200 { $exists = 'true'; Write-Host 'Release already exists; skipping duplicate build.' }
             404 { $exists = 'false'; Write-Host 'Release not published; starting build.' }
-            default { throw "Cannot check portable release: HTTP $($check.StatusCode)" }
+            default { throw "Cannot check release: HTTP $($check.StatusCode)" }
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "release=$release" >> $env:GITHUB_OUTPUT
@@ -71,17 +71,17 @@ jobs:
         with:
           go-version-file: xray-src/go.mod
           cache: false
-      - name: Test portable policy and patcher
+      - name: Test Windows optimization policy and patcher
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
           go test ./portable ./recvwindow
           if ($LASTEXITCODE -ne 0) { throw 'Go unit tests failed' }
           go build ./portable
-          if ($LASTEXITCODE -ne 0) { throw 'Portable Windows module build failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Windows optimizer module build failed' }
           python -m unittest discover -s tests -v
           if ($LASTEXITCODE -ne 0) { throw 'Python tests failed' }
-      - name: Apply portable patch to Xray TCP dialer
+      - name: Apply Windows TCP optimization patch
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
@@ -90,7 +90,7 @@ jobs:
           gofmt -w xray-src/transport/internet/system_dialer.go
           Get-ChildItem xray-src/transport/internet/winopt_*.go | ForEach-Object { gofmt -w $_.FullName }
           if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
-      - name: Compile complete portable Xray Windows amd64
+      - name: Compile Xray-WinOptimize Windows amd64
         if: steps.upstream.outputs.exists != 'true'
         working-directory: xray-src
         shell: pwsh
@@ -99,33 +99,33 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: '0'
         run: |
-          go build -trimpath -buildvcs=false -o ../xray-winopt-portable.exe ./main
+          go build -trimpath -buildvcs=false -o ../xray-winopt.exe ./main
           if ($LASTEXITCODE -ne 0) { throw 'Xray compile failed' }
       - name: Prepare release ZIP
         if: steps.upstream.outputs.exists != 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item xray-winopt-portable.exe release/
+          Copy-Item xray-winopt.exe release/
           Copy-Item upstream-commit.txt release/
           Copy-Item README.md release/README-project.zh-CN.md
           Copy-Item README.en.md release/README-project.en.md
           Copy-Item docs/TECHNICAL.md release/TECHNICAL.md
           Copy-Item docs/INSTALL-WINDOWS.md release/
           Copy-Item LICENSE release/
-          Get-FileHash release/xray-winopt-portable.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
-          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip" -Force
-      - name: Upload Windows portable artifact
+          Get-FileHash release/xray-winopt.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
+          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winopt.zip" -Force
+      - name: Upload Xray-WinOptimize artifact
         if: steps.upstream.outputs.exists != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: xray-winopt-portable-${{ steps.upstream.outputs.tag }}
-          path: xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip
+          name: xray-winopt-${{ steps.upstream.outputs.tag }}
+          path: xray-${{ steps.upstream.outputs.tag }}-winopt.zip
       - name: Publish beta only after owner enables opt-in
-        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_PORTABLE_PRERELEASE == 'true'
+        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_WINOPT_PRERELEASE == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winopt-portable.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Xray-WinOptimize Portable' --notes 'Experimental portable Windows receiver-buffer policy: no driver or administrator privilege; not a replacement for Windows kernel TCP. See docs/TECHNICAL.md and validation status.'
+          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winopt.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Xray-WinOptimize' --notes 'Experimental Windows TCP receive optimization; standard Windows sockets, no additional driver or administrator privilege. See docs/TECHNICAL.md and validation status.'
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed' }

@@ -27,6 +27,7 @@ class PortablePatcherTests(unittest.TestCase):
         changed=module.transform(DIALER)
         self.assertEqual(changed.count('|| winOptEnabled('),1)
         self.assertIn('winOptBeforeConnect(',changed)
+        self.assertIn('winOptApplyTCPOpts(',changed)
         self.assertIn('winOptAfterConnect(',changed)
         self.assertIn('winOptDialFailed(',changed)
         self.assertIn('winOptConnectState',changed)

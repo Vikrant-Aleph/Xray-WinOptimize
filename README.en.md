@@ -1,21 +1,19 @@
 # Xray-WinOptimize
 
-An **unofficial, experimental Windows performance fork of Xray-core**. Its default **Portable** mode uses Windows Winsock and a Linux-*inspired* receiver-buffer growth heuristic to help high-RTT/high-congestion traffic, without administrator privileges or an external driver.
+An unofficial Windows performance optimization project for Xray-core. It implements Linux-inspired receive-buffer growth for high-latency, congested TCP outbound connections.
 
-This is **not** a port of Linux TCP. It monitors RTT, incoming byte counts, and window/buffer state via `SIO_TCP_INFO`, then selectively uses `SO_RCVBUF`. Explicit receive-buffer settings alter Windows autotuning behavior. Full upstream Xray builds and real-world throughput remain to be validated.
+The default build uses Windows native TCP without requiring administrator privileges or extra network drivers. It does **not** replace the Windows TCP stack or guarantee a throughput gain in all environments. Experimental status.
 
-### Download & run
+### Download and run
 
-1. Open **Actions → Xray-WinOptimize Portable (latest upstream)** and run the workflow. Leave the version blank to track the latest published upstream Xray release, including prereleases.
-2. Download the successful artifact, unpack `xray-winopt-portable.exe`, and remove any earlier manual `SO_RCVBUF` custom socket option from your Xray configuration.
-3. Launch as a **normal user**, just like official Xray:
+1. Open **Actions → Xray-WinOptimize (latest upstream)** and manually run the workflow. Leave the version blank to use the latest Xray upstream Release, including prereleases.
+2. Download the successful Artifact, unpack `xray-winopt.exe` and remove any manually configured `SO_RCVBUF` from your Xray configuration.
+3. Run normally:
 
    ```powershell
-   .\xray-winopt-portable.exe run -config .\config.json
+   .\xray-winopt.exe run -config .\config.json
    ```
 
-Disable the optimization with `$env:XRAY_WINOPT_MODE='off'`. Set `$env:XRAY_WINOPT_LOG='1'` for diagnostic messages. The per-connection cap and overall buffer-request budget scale with system RAM; override them with `XRAY_WINOPT_MAX_MIB=1..64` and `XRAY_WINOPT_BUDGET_MIB=32..2048` (MiB).
+To disable optimization, set `XRAY_WINOPT_MODE=off` before launch. For connection-level TCP timestamp experimentation, set `XRAY_WINOPT_TCP_TIMESTAMPS=on` (default: do not modify timestamps). Enable logging with `XRAY_WINOPT_LOG=1`. Timestamp changes are **not** proven to improve speed.
 
-The optional separate WinDivert-based TCP backend is an **experimental, privileged** research branch, not part of the default Portable executable.
-
-Detailed architecture/change log: [docs/TECHNICAL.md](docs/TECHNICAL.md). Windows notes: [docs/INSTALL-WINDOWS.md](docs/INSTALL-WINDOWS.md). Upstream: [XTLS/Xray-core](https://github.com/XTLS/Xray-core).
+See [technical design and change log](docs/TECHNICAL.md), [Windows setup](docs/INSTALL-WINDOWS.md), and [publishing](docs/PUBLISH-GITHUB.md). The separate WinDivert TCP backend remains an optional research path and is not part of the standard executable.
