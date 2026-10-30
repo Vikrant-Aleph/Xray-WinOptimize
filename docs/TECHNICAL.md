@@ -123,11 +123,11 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 | `XRAY_WINOPT_MAX_MIB` | **自动随物理内存** | 可指定 1..64 MiB 的单连接上限 |
 | `XRAY_WINOPT_BUDGET_MIB` | **自动随物理内存** | 可指定 32..2048 MiB 的进程请求预算 |
 
-使用方式是 `xray-winopt.exe run -config config.json`，不安装驱动，不修改 Windows 全局 TCP 设置，不要求管理员权限。**免管理员并不意味着可以在所有 Windows 沙箱或安全软件环境中正常运行 SIO_TCP_INFO**；运行验证仍然必需。
+现行 Release 的使用方式是 `xray.exe run -config config.json`，不安装驱动，不修改 Windows 全局 TCP 设置，不要求管理员权限。**免管理员并不意味着可以在所有 Windows 沙箱或安全软件环境中正常运行 SIO_TCP_INFO**；运行验证仍然必需。
 
 ## 7. GitHub Actions 与发布流程
 
-默认工作流 `upstream-release.yml` 每 6 小时检查 `XTLS/Xray-core` 最新已发布 Release（包括预发布）。留空 `upstream_tag` 的手动运行也会选择最新版本；特定标签可用于复现。流程：获取上游标签 → 拉取源码 → Go/Python 测试 → 严格 `patch/apply_portable.py` → Windows amd64 构建 → ZIP Artifact；发布预发布版本需仓库变量 `ENABLE_WINOPT_PRERELEASE=true`，**目前不要开启**。原 WinDivert 工作流是独立手动实验，不包含在默认 EXE 中。
+现行默认工作流 `upstream-release.yml` 改为每隔一个日历日检查 Xray 上游最新发布；五个 Windows 平台全数成功后自动公开实验性 Release，详见本文最后新增的 2026-10-30 多架构发布变更记录。此前“每 6 小时／可选预发布／仅 amd64”的描述仅作为历史备查。
 
 上游源码改变导致锚点不匹配，必须明确失败并维护补丁。工作流通过不等于代理功能或性能已验证。
 
@@ -735,3 +735,28 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 新增独立文档 [`docs/FINGERPRINT-AUDIT.md`](FINGERPRINT-AUDIT.md)，审核默认 Winsock 后端与早期 WinDivert 实验构建的差异，说明冷连接、目标缓存热连接和可选 TCP 时间戳三种情况下的被动指纹面，提供不依赖服务器 SSH 的 Windows `pktmon` 抓包对照流程，并明确证据边界。
 
 **本次仅新增文档，不改变任何 Go 代码、缓冲区增长算法或 GitHub Actions。** 已确认在默认模式中 TIME_STAMPS 不主动设置；10min 目标缓存可能在握手前改变 Socket 选项，属于需要 PCAP 核查的潜在风险。尚未获得 SYN/ACK 抓包及 GFW 规则实证，不得对外宣称“无指纹”或“保证不可检测”。
+
+
+## 2026-10-30 — 自动检测上游与五平台 Windows Release（CI 与发布制度）
+
+- **问题／目标：** 之前只有单一 Windows amd64 Artifact，且自动 GitHub Release 需要另开变量。现在每隔一个日历日检查上游新版本并公开发布所要求的五个 Windows 平台 ZIP。
+- **涉及文件：** `.github/workflows/upstream-release.yml`（select/verify-patch/build-windows/publish 四阶段）、`scripts/release_targets.py`、`scripts/check_release_assets.py`、`scripts/package_windows.py`、`scripts/verify_release.py`、`tests/test_multi_windows_release.py`、`tests/test_public_naming.py`、`README.md`、`README.en.md`、`docs/PUBLISH-GITHUB.md` 和本文件。运行时 TCP 增长策略没有修改。
+- **具体修改：** 每隔一天查询上游最近发布的 Release（含预发布），支持手动填标签；只在项目同名 Release 已拥有五个非空 ZIP 时跳过；对每一个目标独立克隆、严格打补丁和编译。五个目标是 `win7-32`/`win7-64`（patched Go）和 `win-32`/`win-64`/`win-arm-64`（官方 Go）。预发布前校验 ZIP 完整性、`xray.exe` PE 架构与 BUILD-INFO；生成 SHA256SUMS；新发布先 Draft 后公开，避免上传中断时暴露残缺发布。输出文件直接名为 `xray.exe`，方便替换 v2rayN 内核。
+- **发布触发时间：** UTC `04:37`，`cron: '37 4 */2 * *'`。此写法按**每月日期**间隔两天，跨月可能出现一天间隔；调度可能延迟。手动运行不受此限制。
+- **兼容性特殊处理：** Go 1.21 起不再支持 Windows 7；Xray 官方采用 `XTLS/go-win7`，该 SDK 可能尚未追上最新上游 go.mod 需要的工具链版本。Win7 失败时 **严禁**用普通 Go 重新编译后贴 Win7 标签，也**不得**在五平台未全部成功的情况下创建公开 Release。
+- **Win7 运行限制：** 本项目 Windows Socket 自适应功能依赖 `SIO_TCP_INFO`/`TCP_INFO_v1`，该接口并不保证 Win7 可用。采用 patched Go **只解决部分 Go 运行时兼容性**，不能使 Win7 自动获得新的 Windows TCP API。Win7 包可能表现为原生 Winsock、没有自适应优化；这不是已完成的 Win7 优化功能。必须实机检查是否正常启动、连接、优化功能是否介入。
+- **验证：** 新增校验用于检查五个固定目标名、PE 架构匹配、防重复发布及缺包拒绝。Python 单元测试和工作流语法静态检查在本地执行。**GitHub Actions 的实际在线构建、patched Go 工具链版本兼容及 Windows 五平台真实运行仍待验证**。不能将编译成功表述为 Windows 7 兼容性已证实。
+- **安全／发布风险：** 自动公开 Pre-release 可能让未验证二进制被下载；README 和 Release notes 均说明实验状态。需要 `contents: write` 权限，公共仓库应将代码审核与技术文档约束保留。
+- **回退：** 恢复此前的单平台工作流及其发布策略；已有 Release 必须按 GitHub 流程独立管理。
+- **待办：** 在 GitHub Actions 实际构建五种架构，检查 Win7 patched SDK 与上游 Go 要求；补充各平台实机联网、Window API 兼容性和客户端集成测试。
+
+
+## 2026-10-30 — 精简五平台 Release ZIP 内容
+
+- **问题／目标：** 五个平台的二进制 ZIP 之前附带中英文项目说明与完整技术文档；为方便直接替换 GUI 客户端内核，按维护者要求移除这三份说明文件。
+- **修改文件：** `scripts/package_windows.py`、`scripts/verify_release.py`、`tests/test_multi_windows_release.py`、`.github/workflows/upstream-release.yml`、`README.md`、`README.en.md`、`docs/PUBLISH-GITHUB.md` 和本文件。TCP 收发、自适应控制算法、跨平台编译配置未修改。
+- **现行格式：** 每个 `Xray-winopt-<target>.zip` **仅包含** `xray.exe`、`LICENSE`、`BUILD-INFO.txt`。中文 README、英文 README 和 `docs/TECHNICAL.md` 均留在仓库中，不再进入二进制发行 ZIP。`SHA256SUMS.txt` 仍是 Release 的单独附件。
+- **校验：** 发布前对 ZIP 内文件名实施**精确集合检查**，不允许夹带旧版的 `README-project.zh-CN.md`、`README-project.en.md` 或 `TECHNICAL.md`；继续验证 PE Machine、目标标识和五包完整性。回归测试增加五包内容断言和“额外文档导致失败”检查。
+- **旧 Release 更新：** 因原有去重只检查五个 ZIP 是否存在且非空，自动定时检查不会为了包装变更而重建已完成的旧 Release。新工作流手动触发支持 `force_rebuild`；勾选后仍需五平台均成功构建、重新验包，然后才覆盖对应发布资产，不跳过失败步骤。
+- **验证边界：** 本地验证覆盖 Python 发行脚本与项目单测；真实 GitHub Actions 编译、现有 Release 资产替换及五平台真实运行需要仓库 Actions 验证。
+- **风险及回退：** 更新旧 ZIP 会改变资产 SHA-256；更新发布时一并覆盖 `SHA256SUMS.txt`。不改变 EXE 的 TCP 行为或任何握手指纹。可回退这些发布脚本与文档，但历史二进制发行文件不会自动还原。

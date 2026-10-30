@@ -1,131 +1,258 @@
 name: Xray-WinOptimize (latest upstream)
 
 on:
+  # UTC: check every other calendar day. GitHub can delay scheduled runs.
   schedule:
-    - cron: '21 */6 * * *'
+    - cron: '37 4 */2 * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: '留空使用 Xray 最新 Release（包含预发布）；填写 vXX.X.X 可指定版本'
+        description: '留空自动选择最新上游 Release（含预发布）；可填写 vXX.X.X'
         required: false
-        default: ''
         type: string
+        default: ''
+      force_rebuild:
+        description: '手动强制重新构建已发布版本，并更新原有 Release 文件'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
 concurrency:
   group: xray-winopt-release
   cancel-in-progress: false
 
 jobs:
-  patch-test-build:
-    runs-on: windows-latest
+  select:
+    name: Check latest upstream and existing assets
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      release: ${{ steps.check.outputs.release }}
+      build: ${{ steps.check.outputs.build }}
     steps:
       - uses: actions/checkout@v4
-      - name: Select upstream release and check duplicate publication
-        id: upstream
-        shell: pwsh
+      - id: check
+        name: Select upstream and check all five Windows packages
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $tag = $env:REQUESTED_TAG
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $response = Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100' -Headers $headers -ErrorAction Stop
-            $jsonPath = Join-Path $env:RUNNER_TEMP 'xray-upstream-releases.json'
-            Set-Content -LiteralPath $jsonPath -Value $response.Content -Encoding utf8 -NoNewline
-            $tag = python scripts/select_latest_release.py $jsonPath
-            if ($LASTEXITCODE -ne 0) { throw "Upstream release selector failed (exit $LASTEXITCODE)" }
-            if ([string]::IsNullOrWhiteSpace($tag)) { throw 'No published Xray release found' }
-          }
-          $tag = $tag.Trim()
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Unsupported upstream tag: $tag" }
-          $release = "$tag-winopt"
-          Write-Host "Selected upstream tag: $tag (latest includes prereleases)"
-          Write-Host "Checking release: $release"
-          $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/releases/tags/$release"
-          $check = Invoke-WebRequest -Method Get -Uri $uri -Headers $headers -SkipHttpErrorCheck -ErrorAction Stop
-          switch ([int]$check.StatusCode) {
-            200 { $exists = 'true'; Write-Host 'Release already exists; skipping duplicate build.' }
-            404 { $exists = 'false'; Write-Host 'Release not published; starting build.' }
-            default { throw "Cannot check release: HTTP $($check.StatusCode)" }
-          }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "release=$release" >> $env:GITHUB_OUTPUT
-          "exists=$exists" >> $env:GITHUB_OUTPUT
-      - name: Fetch exact upstream Xray release
-        if: steps.upstream.outputs.exists != 'true'
-        shell: pwsh
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            curl --fail --silent --show-error --location \
+              --retry 3 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -o "$RUNNER_TEMP/releases.json" \
+              'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100'
+            tag="$(python3 scripts/select_latest_release.py "$RUNNER_TEMP/releases.json")"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported upstream tag: $tag" >&2
+            exit 1
+          fi
+          release="${tag}-winopt"
+          echo "Selected upstream release: $tag"
+          echo "Project release: $release"
+          status="$(curl --silent --show-error --location \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            --output "$RUNNER_TEMP/project-release.json" \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$release")"
+          case "$status" in
+            404) build=true; echo 'Release not found: build all targets.' ;;
+            200)
+              if [[ "$FORCE_REBUILD" == 'true' ]]; then
+                build=true
+                echo 'Manual forced rebuild: replace all five existing archives.'
+              elif python3 scripts/check_release_assets.py "$RUNNER_TEMP/project-release.json"; then
+                build=false
+                echo 'All five Windows packages already exist: no rebuild.'
+              else
+                build=true
+                echo 'Release assets incomplete: rebuild all targets before repair.'
+              fi
+              ;;
+            *) echo "Unexpected GitHub Release API status: $status" >&2; exit 1 ;;
+          esac
+          {
+            echo "tag=$tag"
+            echo "release=$release"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  verify-patch:
+    name: Validate patch against selected Xray source
+    needs: select
+    if: needs.select.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch selected upstream version
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ needs.select.outputs.tag }}
         run: |
-          git clone --depth 1 --branch '${{ steps.upstream.outputs.tag }}' https://github.com/XTLS/Xray-core.git xray-src
-          if ($LASTEXITCODE -ne 0) { throw 'git clone failed' }
-          git -C xray-src rev-parse HEAD | Out-File upstream-commit.txt
+          set -euo pipefail
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/XTLS/Xray-core.git xray-src
       - uses: actions/setup-go@v5
-        if: steps.upstream.outputs.exists != 'true'
         with:
           go-version-file: xray-src/go.mod
           cache: false
-      - name: Test Windows optimization policy and patcher
-        if: steps.upstream.outputs.exists != 'true'
-        shell: pwsh
+      - name: Run tests and verify strict patch anchors
+        shell: bash
         run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -v
           go test ./portable ./recvwindow
-          if ($LASTEXITCODE -ne 0) { throw 'Go unit tests failed' }
-          go build ./portable
-          if ($LASTEXITCODE -ne 0) { throw 'Windows optimizer module build failed' }
-          python -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed' }
-      - name: Apply Windows TCP optimization patch
-        if: steps.upstream.outputs.exists != 'true'
-        shell: pwsh
-        run: |
-          python patch/apply_portable.py xray-src
-          if ($LASTEXITCODE -ne 0) { throw 'Patch incompatible with upstream release; stop' }
+          python3 patch/apply_portable.py xray-src
           gofmt -w xray-src/transport/internet/system_dialer.go
-          Get-ChildItem xray-src/transport/internet/winopt_*.go | ForEach-Object { gofmt -w $_.FullName }
-          if ($LASTEXITCODE -ne 0) { throw 'gofmt failed' }
-      - name: Compile Xray-WinOptimize Windows amd64
-        if: steps.upstream.outputs.exists != 'true'
-        working-directory: xray-src
-        shell: pwsh
+          gofmt -w xray-src/transport/internet/winopt_*.go
+
+  build-windows:
+    name: Build ${{ matrix.target }}
+    needs: [select, verify-patch]
+    if: needs.select.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win7-32
+            goarch: '386'
+            legacy: true
+          - target: win7-64
+            goarch: amd64
+            legacy: true
+          - target: win-32
+            goarch: '386'
+            legacy: false
+          - target: win-64
+            goarch: amd64
+            legacy: false
+          - target: win-arm-64
+            goarch: arm64
+            legacy: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact upstream release
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ needs.select.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/XTLS/Xray-core.git xray-src
+          git -C xray-src rev-parse HEAD > upstream-commit.txt
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xray-src/go.mod
+          cache: false
+      - name: Install XTLS patched Go SDK for Windows 7 builds
+        if: matrix.legacy
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(go env GOROOT)"
+          archive="$RUNNER_TEMP/go-for-win7-linux-amd64.zip"
+          # Follow Xray's official release-win7.yml: patched Go is essential.
+          curl --fail --silent --show-error --location --retry 3 \
+            -o "$archive" \
+            'https://github.com/XTLS/go-win7/releases/latest/download/go-for-win7-linux-amd64.zip'
+          test -s "$archive"
+          find "$sdk" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          unzip -q "$archive" -d "$sdk"
+          go version
+          # Never silently switch back to a standard toolchain on Win7.
+          echo 'GOTOOLCHAIN=local' >> "$GITHUB_ENV"
+      - name: Patch and cross-compile Xray
+        shell: bash
         env:
           GOOS: windows
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
+          GOTOOLCHAIN: ${{ matrix.legacy && 'local' || 'auto' }}
+          TARGET: ${{ matrix.target }}
         run: |
-          go build -trimpath -buildvcs=false -o ../xray-winopt.exe ./main
-          if ($LASTEXITCODE -ne 0) { throw 'Xray compile failed' }
-      - name: Prepare release ZIP
-        if: steps.upstream.outputs.exists != 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item xray-winopt.exe release/
-          Copy-Item upstream-commit.txt release/
-          Copy-Item README.md release/README-project.zh-CN.md
-          Copy-Item README.en.md release/README-project.en.md
-          Copy-Item docs/TECHNICAL.md release/TECHNICAL.md
-          Copy-Item docs/INSTALL-WINDOWS.md release/
-          Copy-Item LICENSE release/
-          Get-FileHash release/xray-winopt.exe -Algorithm SHA256 | Format-List | Out-File release/SHA256.txt
-          Compress-Archive release/* "xray-${{ steps.upstream.outputs.tag }}-winopt.zip" -Force
-      - name: Upload Xray-WinOptimize artifact
-        if: steps.upstream.outputs.exists != 'true'
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          python3 patch/apply_portable.py xray-src
+          gofmt -w xray-src/transport/internet/system_dialer.go
+          gofmt -w xray-src/transport/internet/winopt_*.go
+          mkdir -p build
+          (
+            cd xray-src
+            go build -trimpath -buildvcs=false \
+              -ldflags='-s -w -buildid=' \
+              -o ../build/xray.exe ./main
+          )
+          test -s build/xray.exe
+          python3 scripts/package_windows.py \
+            --target "$TARGET" --exe build/xray.exe \
+            --upstream '${{ needs.select.outputs.tag }}' \
+            --commit "$(cat upstream-commit.txt)" \
+            --output "dist/Xray-winopt-${TARGET}.zip"
+      - uses: actions/upload-artifact@v4
         with:
-          name: xray-winopt-${{ steps.upstream.outputs.tag }}
-          path: xray-${{ steps.upstream.outputs.tag }}-winopt.zip
-      - name: Publish beta only after owner enables opt-in
-        if: steps.upstream.outputs.exists != 'true' && vars.ENABLE_WINOPT_PRERELEASE == 'true'
-        shell: pwsh
+          name: winopt-${{ matrix.target }}
+          path: dist/Xray-winopt-${{ matrix.target }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish complete five-platform Release
+    needs: [select, verify-patch, build-windows]
+    if: needs.select.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: winopt-*
+          path: dist
+          merge-multiple: true
+      - name: Check all five archives and create checksum manifest
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ needs.select.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_release.py dist --checksums dist/SHA256SUMS.txt
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Xray-WinOptimize（非官方实验构建），基于 Xray-core ${UPSTREAM_TAG}。
+
+          五个平台：win7-32 / win7-64 / win-32 / win-64 / win-arm-64。
+          每个压缩包仅含 xray.exe、LICENSE 和 BUILD-INFO.txt，可用于替换图形化客户端对应架构的内核。中英文项目说明和技术文档保留在 GitHub 仓库，不随二进制包附带。
+
+          **特别提醒**：Windows 7 使用 XTLS/go-win7 兼容编译器；本项目依赖的 SIO_TCP_INFO 在 Windows 7 上并无可靠可用性保证，因此 Win7 包不能承诺自适应接收窗口功能实际生效，系统必须满足 patched Go 的更新前提。普通 Windows 包也尚需对应系统实机验证。
+
+          本项目的网络优化只在作者特定环境测得过改善，不保证所有网络提速；修改 TCP 接收窗口可能带来被动可观察的流量特征。见仓库 README 和 docs/TECHNICAL.md。
+
+          本次自动流程验证了源码补丁、编译和 PE 架构；不代表五种平台已经完成真实联网、REALITY 或性能验证。
+          EOF
+      - name: Publish to GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.select.outputs.release }}
+          UPSTREAM_TAG: ${{ needs.select.outputs.tag }}
         run: |
-          gh release create '${{ steps.upstream.outputs.release }}' "xray-${{ steps.upstream.outputs.tag }}-winopt.zip" --prerelease --title '${{ steps.upstream.outputs.tag }} Xray-WinOptimize' --notes 'Experimental Windows TCP receive optimization; standard Windows sockets, no additional driver or administrator privilege. See docs/TECHNICAL.md and validation status.'
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed' }
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft >/dev/null 2>&1; then
+            # Repair an older incomplete release only after all five builds succeeded.
+            gh release upload "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt --clobber
+            gh release edit "$RELEASE_TAG" --prerelease --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            # Prepare a draft: never expose a partially uploaded new release.
+            gh release create "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt \
+              --draft --prerelease \
+              --title "Xray-WinOptimize ${UPSTREAM_TAG}（Windows 全架构）" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease
+          fi
+          echo "Published $RELEASE_TAG with all five Windows ZIP archives."

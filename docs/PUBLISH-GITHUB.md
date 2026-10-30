@@ -10,6 +10,40 @@
 
 ---
 
+## 2026-10-30 — 每隔一天自动发布五种 Windows 核心（当前流程）
+
+`.github/workflows/upstream-release.yml` 是唯一的正式 Xray-WinOptimize 发布工作流：
+
+1. **定时检查**：UTC `04:37`，cron `37 4 */2 * *`（按月份日期每隔一天，月初交界可能不严格间隔 48 小时；GitHub 也可能延迟任务）。可手动触发；`upstream_tag` 留空时选上游最新发布，**包含预发布但排除草稿**。
+2. **防重复**：读取项目同名 GitHub Release 的资产。只有 `win7-32`、`win7-64`、`win-32`、`win-64`、`win-arm-64` 这 **5 个 ZIP 全部存在且大小非零** 才跳过。之前 Release 不存在或部分资产缺失时构建 5 个完整目标。手动触发时可勾选 `force_rebuild`，让已有完整 Release 重新构建并以新格式覆盖五个 ZIP。
+3. **补丁校验**：针对该上游精确 tag 克隆源码；运行 Python、Go 单测，并严格匹配补丁锚点；不兼容时终止构建。
+4. **矩阵编译**：所有目标使用 `GOOS=windows`、`CGO_ENABLED=0`；`GOARCH` 分别为 `386`、`amd64`、`arm64`。Windows 7 两个目标使用 [XTLS/go-win7](https://github.com/XTLS/go-win7) 已补丁工具链，沿用 Xray 官方 Windows 7 构建流程；**绝不能**以标准 Go 构建的二进制冒充 Windows 7 版本。若 patched Go 版本落后于 Xray 所需 Go 版本，该目标会报错并中止发布，而不是自动切换回标准 Go。
+5. **资产校验**：每个 `Xray-winopt-<target>.zip` **仅含** `xray.exe`、`LICENSE` 和 `BUILD-INFO.txt` 三个文件，不附带中文/英文 README 或技术文档；说明文档保留在仓库。Python 打包器验证 PE Machine，发布阶段校验五个 ZIP 的**精确文件清单**和架构，生成 `SHA256SUMS.txt`。
+6. **原子化公开**：所有矩阵任务成功后，先创建 Draft Release 并上传完整资产，最后再公开为 Pre-release。现有缺文件的 Release 只有在全部构建成功后才尝试修复。任何编译／检查失败都不创建新的公开 Release。
+
+ZIP 内部文件固定为 `xray.exe`、`LICENSE`、`BUILD-INFO.txt`。若发现额外的 `README-project.zh-CN.md`、`README-project.en.md` 或 `TECHNICAL.md`，发布验证会失败。
+
+正式文件名如下：
+
+```text
+Xray-winopt-win7-32.zip
+Xray-winopt-win7-64.zip
+Xray-winopt-win-32.zip
+Xray-winopt-win-64.zip
+Xray-winopt-win-arm-64.zip
+SHA256SUMS.txt
+```
+
+GitHub 自动发布要求仓库 **Settings → Actions → General → Workflow permissions** 允许 `GITHUB_TOKEN` 写入仓库内容。workflow 已声明 `contents: write`。当前自动公开的是 **Pre-release**（实验性），并非稳定版。此流程替代历史的 `ENABLE_WINOPT_PRERELEASE` 变量，更新后不再需要该开关。
+
+**重要兼容性警告：** 当前优化控制器依赖 `SIO_TCP_INFO`；Windows 7 不保证提供这个接口，虽然使用 patched Go 能生成 Win7 二进制，但 **Win7 自适应接收窗口可能不生效**，而且没有实机联网验证。与 Windows 10/11 的真实运行能力应分别验证。Win7 最新补丁工具链也可能落后上游 Xray 所需版本，此时五平台整套发布会暂停，不能发布不兼容版本。
+
+**已经发布的旧包不会因修改工作流自动改变。** 如需替换同一 Xray 版本的 ZIP，请手动运行 `Xray-WinOptimize (latest upstream)`，填写对应 `upstream_tag`（或留空选择最新），并勾选 `force_rebuild`。只有 5 平台重新编译且通过校验后才更新资产。
+
+**回退方式：** 回退 `.github/workflows/upstream-release.yml`、新增 `scripts/*release*.py`、`scripts/package_windows.py` 与文档改动。已经公开的历史 Release 不会自动删除。不要把二进制重命名为 `win7` 来绕过编译失败。
+
+---
+
 ## 旧版独立 TCP 栈发布流程（历史备份）
 
 # Xray-WinOptimize — GitHub 公开发布与持续更新

@@ -14,25 +14,39 @@
 - 自适应机制会调用 Windows Socket 的 `SO_RCVBUF`，因此可能改变网络上可观察到的 **TCP 接收窗口通告、ACK/数据包时序等细微流量行为特征**。这些变化理论上可能成为被动流量分析的辅助特征；**尚无证据表明它们构成独有的 Xray 指纹，也不能保证不可被识别**。参见[流量指纹风险审计](docs/FINGERPRINT-AUDIT.md)。
 - 当前为实验版本。使用前备份原内核和配置；若已在出站手动指定 `SO_RCVBUF`，建议先移除该选项再比较自适应效果。
 
-## 下载
+## 下载与自动发布
 
-进入仓库 **Actions → Xray-WinOptimize (latest upstream)**，点击 **Run workflow**。版本输入留空时使用 Xray 上游最新 Release（包括预发布）。构建成功后，在 **Artifacts** 下载构建包并解压，得到 `xray-winopt.exe`。
+项目每隔一天（GitHub Actions 的 UTC 定时）检查一次 **Xray 官方最新 Release**（包括预发布、排除草稿），只有版本未发布完整的 WinOptimize 构建时才重新构建，并在 **[Releases](https://github.com/Vikrant-Aleph/Xray-WinOptimize/releases)** 自动发布以下 5 个 ZIP：
+
+| 安装包 | 目标平台 |
+|---|---|
+| `Xray-winopt-win7-32.zip` | Windows 7 32 位（特殊兼容工具链） |
+| `Xray-winopt-win7-64.zip` | Windows 7 64 位（特殊兼容工具链） |
+| `Xray-winopt-win-32.zip` | 现代 Windows x86 |
+| `Xray-winopt-win-64.zip` | 现代 Windows x64 |
+| `Xray-winopt-win-arm-64.zip` | Windows ARM64 |
+
+**每个 ZIP 只包含 `xray.exe`、`LICENSE` 和 `BUILD-INFO.txt`，不附带项目 README 或技术文档**；这些说明保留在 GitHub 仓库。内核可直接用于兼容的图形客户端，不必手动重命名。五个平台必须全部构建且通过架构检查才公开新的 Release；否则构建失败，不以旧版内核冒充新版本。
+
+**Windows 7 特别说明：** Windows 7 已不受标准 Go 支持。Win7 构建使用 [XTLS/go-win7](https://github.com/XTLS/go-win7) 补丁工具链，并要求相应系统更新；由于本项目当前依赖的 Windows `SIO_TCP_INFO` 接口在 Windows 7 上不保证可用，**不能保证 Win7 构建具有有效的接收窗口自适应优化**。Win7 兼容性和真实联网尚未经过实机测试。其他平台也需要实际测试确认功能。不要因为有下载文件就认为兼容性已经验证。
+
+开发者可在 [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions) 手动运行 `Xray-WinOptimize (latest upstream)`，留空版本号表示使用上游最新 Release。完整发布流程见[构建与发布说明](docs/PUBLISH-GITHUB.md)。
 
 ## 安装与启动
 
 ### 方式一：命令行
 
-将 `xray-winopt.exe` 和原来的 Xray 配置文件放在同一目录，按原版方式启动：
+将 Release ZIP 中的 `xray.exe` 和原来的 Xray 配置文件放在同一目录，按原版方式启动：
 
 ```powershell
-.\xray-winopt.exe run -config .\config.json
+.\xray.exe run -config .\config.json
 ```
 
 ### 方式二：替换图形化客户端中的 Xray 内核（例如 v2rayN）
 
 1. **彻底退出** v2rayN 等图形化客户端，确保 Xray 进程已停止，并备份原来的 `xray.exe`。
 2. 找到客户端实际使用的 **Xray 内核目录**。常见 v2rayN Windows 安装目录为 `bin\xray\`，其中的 `xray.exe` 是要替换的内核；不同版本或安装方式可能有所区别，请以实际路径为准。
-3. 将构建产物 `xray-winopt.exe` **重命名为 `xray.exe`**，复制到该目录，覆盖原内核文件。**不要替换图形化客户端自身的 EXE**，也不要删除该目录中的其他必要文件。
+3. 将 Release 中的 `xray.exe` 复制到该目录，覆盖原内核文件。**不要替换图形化客户端自身的 EXE**，也不要删除该目录中的其他必要文件。
 4. 重新打开客户端，确认选择的是 **Xray 核心**，并从运行日志或内核版本信息检查是否正常启动。节点和现有系统代理设置通常无需改变。
 
 客户端自身的 **更新内核** 功能可能重新覆盖该文件；更新后如需继续使用本项目，须再次替换。遇到兼容性或连接问题，停止客户端并恢复备份的原版 `xray.exe`。
@@ -43,7 +57,7 @@
 
 ```powershell
 $env:XRAY_WINOPT_MODE = 'off'
-.\xray-winopt.exe run -config .\config.json
+.\xray.exe run -config .\config.json
 ```
 
 默认只缓存路径 RTT 等历史指标，**不会**自动把上一条连接的缓冲区大小用到下一条连接握手前；其他实验选项、源码改动与限制见技术文档。

@@ -14,21 +14,33 @@
 - Changing socket receive-buffer management may subtly affect **advertised TCP receive windows, ACK timing, and packet timing**, potentially exposing additional traffic-behavior features to passive observers. It has **not** been demonstrated that these changes are unique to Xray or that they enable a reliable classifier; the project does **not** promise unidentifiability. See the [fingerprint security audit](docs/FINGERPRINT-AUDIT.md).
 - This remains experimental. Back up the existing core and configuration. For a fair adaptive test, remove manually configured outbound `SO_RCVBUF` options.
 
-## Download and run
+## Downloads and automatic releases
 
-From **Actions → Xray-WinOptimize (latest upstream)**, click **Run workflow**. Leave the upstream version empty to build against the latest upstream Xray Release, including prereleases. Download the successful **Artifact** and unpack `xray-winopt.exe`.
+Every other day, GitHub Actions checks the latest published Xray-core Release (prereleases included). If no complete WinOptimize Release for that upstream version exists, it builds all five Windows targets and publishes a GitHub [Release](https://github.com/Vikrant-Aleph/Xray-WinOptimize/releases) **only after every target succeeds**:
+
+- `Xray-winopt-win7-32.zip` — Windows 7 x86 (patched Go SDK)
+- `Xray-winopt-win7-64.zip` — Windows 7 x64 (patched Go SDK)
+- `Xray-winopt-win-32.zip` — modern Windows x86
+- `Xray-winopt-win-64.zip` — modern Windows x64
+- `Xray-winopt-win-arm-64.zip` — Windows ARM64
+
+Each ZIP contains only **`xray.exe`**, `LICENSE`, and `BUILD-INFO.txt`. Project READMEs and technical documentation remain in the GitHub repository, not in the binary archives. To build manually, run **Actions → Xray-WinOptimize (latest upstream)** with an empty version input.
+
+**Win7 warning:** These builds rely on [XTLS/go-win7](https://github.com/XTLS/go-win7) and system updates. The Windows `SIO_TCP_INFO` API required by the adaptive optimization is not guaranteed on Windows 7, so a Win7 binary might start without the optimization working. Runtime and network compatibility have not been verified. A successful build does not prove support.
+
+## Run
 
 **Command line:**
 
 ```powershell
-.\xray-winopt.exe run -config .\config.json
+.\xray.exe run -config .\config.json
 ```
 
 **Graphical clients (e.g. v2rayN):**
 
 1. Fully exit the client and stop the Xray process. Back up the existing `xray.exe`.
 2. Locate the Xray core used by the client (commonly `bin\xray\xray.exe` within a Windows v2rayN installation; layouts vary).
-3. Rename `xray-winopt.exe` to **`xray.exe`** and replace the core binary only. Do not replace the GUI program or delete other core assets.
+3. Copy the archive's **`xray.exe`** into the Xray core directory, replacing only the core binary. Do not replace the GUI program or delete other core assets.
 4. Restart the client, select the **Xray** core if necessary, and confirm startup in its logs. Restore the backed-up core if anything fails.
 
 A GUI client's own **Update Core** action may overwrite the modified binary and require replacing it again.
