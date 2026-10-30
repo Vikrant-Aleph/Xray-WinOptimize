@@ -15,7 +15,7 @@
    .\xray-winopt.exe run -config .\config.json
    ```
 
-默认只影响 Xray 发起的 TCP 出站连接，不改变其他 Windows 应用的流量或系统全局 TCP 设置。关闭优化：
+默认只影响 Xray 发起的 TCP 出站连接，不改变其他 Windows 应用或系统全局 TCP 设置；跨连接仅缓存 RTT 等路径历史信息，不会默认在握手前复用上一条连接的接收缓冲区。关闭优化：
 
 ```powershell
 $env:XRAY_WINOPT_MODE='off'

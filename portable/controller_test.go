@@ -248,3 +248,39 @@ func TestTimestampOptionParsing(t *testing.T) {
 		}
 	}
 }
+
+// Unlike a reused SO_RCVBUF value, the RTT history only helps retain the
+// first observation window before SIO_TCP_INFO has a current-connection RTT.
+func TestHistoricalRTTHintOnlyHelpsObserve(t *testing.T) {
+	start := time.Unix(400, 0)
+	base := uint32(256 * 1024)
+	hinted := winOptNewController(8 * winOptMiB)
+	hinted.SetRTTHint(160 * time.Millisecond)
+	noHint := winOptNewController(8 * winOptMiB)
+	first := winOptSample{At: start, RTT: 0, RcvBuf: base, RcvWnd: base}
+	if n := hinted.Observe(first); n != 0 {
+		t.Fatalf("hint caused premature change: %d", n)
+	}
+	if n := noHint.Observe(first); n != 0 {
+		t.Fatalf("no-hint premature change: %d", n)
+	}
+	next := sample(start.Add(200*time.Millisecond), 160, 800*1024, base, base)
+	if n := noHint.Observe(next); n != 0 {
+		t.Fatalf("unhinted connection should just initialize: %d", n)
+	}
+	if n := hinted.Observe(next); n != winOptMiB {
+		t.Fatalf("hint should allow first completed RTT observation: %d", n)
+	}
+}
+
+func TestRTTHintCannotCauseGrowthWithoutLiveRTT(t *testing.T) {
+	c := winOptNewController(8 * winOptMiB)
+	c.SetRTTHint(160 * time.Millisecond)
+	start := time.Unix(400, 0)
+	for i := 0; i < 10; i++ {
+		s := winOptSample{At: start.Add(time.Duration(i) * 200 * time.Millisecond), RTT: 0, BytesIn: uint64(i) * 1024 * 1024, RcvBuf: 256 * 1024, RcvWnd: 256 * 1024}
+		if n := c.Observe(s); n != 0 {
+			t.Fatalf("cached RTT must not authorize SO_RCVBUF, got %d", n)
+		}
+	}
+}

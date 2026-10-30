@@ -264,7 +264,9 @@ func winOptApplyTCPOpts(raw syscall.RawConn, network, address string) {
 }
 
 func winOptBeforeConnect(raw syscall.RawConn, network, address string, state *winOptConnectState) {
-	if !winOptEnabled(network) || winOptActiveWatchers.Load() >= 256 {
+	// Default: never apply a learned SO_RCVBUF before SYN. This keeps the
+	// default connection handshake independent of previous flow capacity.
+	if !winOptEnabled(network) || !winOptPreconnectCapacityEnabled(os.Getenv("XRAY_WINOPT_PRECONNECT_CACHE")) || winOptActiveWatchers.Load() >= 256 {
 		return
 	}
 	bytes := winOptKnown(address)
@@ -373,6 +375,16 @@ func winOptAfterConnect(conn net.Conn, network, address string, explicit bool, s
 		id := warm.id
 		defer func() { winOptRelease(id) }()
 		ctrl := winOptNewController(winOptLimit())
+		// Linux tcp_metrics keeps path observations apart from per-socket
+		// receive-buffer growth. Reuse only an RTT hint, after connect.
+		hint := winOptRTTHistory.lookup(address, time.Now())
+		if hint == 0 {
+			hint = winOptRTTHistory.lookup(peer, time.Now())
+		}
+		if hint > 0 {
+			ctrl.SetRTTHint(hint)
+			winOptLog("rtt_hint target=%s rtt_ms=%d", address, hint.Milliseconds())
+		}
 		initialized := false
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
@@ -383,6 +395,13 @@ func winOptAfterConnect(conn net.Conn, network, address string, explicit bool, s
 			} // socket closed or no TCP_INFO available
 			if info.RcvBuf == 0 {
 				continue
+			}
+			// Keep path history even when this connection never needs a
+			// larger receive buffer. No new packet is sent by this lookup.
+			if info.RttUs > 0 {
+				observed := time.Duration(info.RttUs) * time.Microsecond
+				winOptRTTHistory.remember(address, observed, now)
+				winOptRTTHistory.remember(peer, observed, now)
 			}
 			if !initialized {
 				initialized = true
@@ -414,8 +433,12 @@ func winOptAfterConnect(conn net.Conn, network, address string, explicit bool, s
 				return
 			}
 			ctrl.Applied(proposal, now)
-			winOptRemember(address, proposal)
-			winOptRemember(peer, proposal)
+			// Legacy capacity cache exists only for explicit performance A/B.
+			// Default history never saves or reapplies SO_RCVBUF across flows.
+			if winOptPreconnectCapacityEnabled(os.Getenv("XRAY_WINOPT_PRECONNECT_CACHE")) {
+				winOptRemember(address, proposal)
+				winOptRemember(peer, proposal)
+			}
 			winOptLog("expanded %s rtt_ms=%d rcvbuf=%d rcvwnd=%d bytes=%d set=%d budget=%d", address, info.RttUs/1000, info.RcvBuf, info.RcvWnd, info.BytesIn, proposal, winOptBudgetLimit())
 		}
 	}()

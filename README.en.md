@@ -14,6 +14,6 @@ The default build uses Windows native TCP without requiring administrator privil
    .\xray-winopt.exe run -config .\config.json
    ```
 
-To disable optimization, set `XRAY_WINOPT_MODE=off` before launch. For connection-level TCP timestamp experimentation, set `XRAY_WINOPT_TCP_TIMESTAMPS=on` (default: do not modify timestamps). Enable logging with `XRAY_WINOPT_LOG=1`. Timestamp changes are **not** proven to improve speed.
+By default, short-lived path RTT observations may be reused *after* a connection is established, but the previous connection's receive-buffer size is not applied before SYN. For an explicit legacy performance comparison only, set `XRAY_WINOPT_PRECONNECT_CACHE=on` before launch (this may alter TCP handshake window characteristics). To disable optimization, set `XRAY_WINOPT_MODE=off` before launch. For connection-level TCP timestamp experimentation, set `XRAY_WINOPT_TCP_TIMESTAMPS=on` (default: do not modify timestamps). Enable logging with `XRAY_WINOPT_LOG=1`. Timestamp changes are **not** proven to improve speed.
 
 See [technical design and change log](docs/TECHNICAL.md), [Windows setup](docs/INSTALL-WINDOWS.md), and [publishing](docs/PUBLISH-GITHUB.md). The separate WinDivert TCP backend remains an optional research path and is not part of the standard executable.

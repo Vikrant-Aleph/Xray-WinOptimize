@@ -1,6 +1,6 @@
 # Xray-WinOptimize 技术文档（交接主文档）
 
-> 版本：Windows TCP Optimization v3.3（Fast Ramp），2026-10-30。**此前版本有用户报告的性能提升；本次加速增长尚未在真实 Windows 测速验证，完整工作流构建仍需验证。** 默认工作模式仍是免管理员的 Windows Winsock；旧 WinDivert 独立协议栈保留为手动实验构建，见附录。每次修改代码、测试、补丁或 Actions，必须在同一次变更中更新本文和变更记录，`docs-check` 仅检查是否修改文档，不能代替审核文档内容。
+> 版本：Windows TCP Optimization v3.4（Path Metrics Cache），2026-10-30。**此前版本有用户报告的性能提升；本次加速增长尚未在真实 Windows 测速验证，完整工作流构建仍需验证。** 默认工作模式仍是免管理员的 Windows Winsock；旧 WinDivert 独立协议栈保留为手动实验构建，见附录。每次修改代码、测试、补丁或 Actions，必须在同一次变更中更新本文和变更记录，`docs-check` 仅检查是否修改文档，不能代替审核文档内容。
 
 ## 0. 目标及最重要的限制
 
@@ -23,10 +23,11 @@
 | `portable/controller.go` | 时间戳实验参数解析；RTT 周期测量；借鉴 Linux 思路的 2 倍基础量 + 趋势增长；有界乱序提示、通用一次性试探扩容和资源限制；v3.3 首次一个完整活跃 RTT 周期即可介入、调整间隔 `max(RTT,400ms)`、单次最多四倍；不使用 RcvWnd 百分比门槛及固定容量特例 |
 | `portable/controller_test.go` | 首次按需求增长（含单 RTT 快速介入）、短流、低 RTT、RTT 周期、满通告窗口仍扩容、400ms 冷却、按需四倍上限、超过 2 MiB 通用增长、冷却/上限/溢出、旧环境变量不影响算法等回归测试 |
 | `portable/quota.go`、`portable/quota_test.go` | 并发安全的进程级 Socket 请求预算，成功申请、增额、回退、关闭释放 |
-| `portable/socket_windows.go` | 可选连接级 TCP 时间戳（仅握手前，失败可回退）；Windows `SIO_TCP_INFO_v1`、`GlobalMemoryStatusEx`、SO_RCVBUF、生存期监控、低内存判断、域名/IP 缓存、并发拨号候选管理 |
+| `portable/history.go`、`portable/history_test.go` | 有界、带 TTL 的按目标 RTT 历史缓存；只保存 RTT 指标，不保存缓冲区容量；首次 RTT 未就绪时作为观测周期提示。包含预连接容量缓存显式开关解析及行为测试 |
+| `portable/socket_windows.go` | 可选连接级 TCP 时间戳（仅握手前，失败可回退）；Windows `SIO_TCP_INFO_v1`、`GlobalMemoryStatusEx`、SO_RCVBUF、生存期监控、低内存判断、域名/IP 的 RTT 路径缓存、可选的旧容量缓存及并发拨号候选管理 |
 | `portable/socket_other.go` | 非 Windows 不启用任何优化，仅供其他平台编译；与 Windows 调用签名一致 |
-| `patch/apply_portable.py` | 在 Dialer.Control 中注入时间戳设置；严格锚点打 Xray TCP 拨号器补丁；复制四个 Portable Go 文件到 `internet` 包；保留用户显式 `SO_RCVBUF` 优先 |
-| `tests/test_portable_patcher.py` | 补丁锚点匹配、重复应用、对 UDP 分支保持不变的回归测试 |
+| `patch/apply_portable.py` | 在 Dialer.Control 中注入时间戳设置；严格锚点打 Xray TCP 拨号器补丁；复制五个优化模块 Go 文件到 `internet` 包；保留用户显式 `SO_RCVBUF` 优先 |
+| `tests/test_portable_patcher.py` | 补丁锚点匹配、重复应用、对 UDP 分支保持不变、拷贝 RTT 历史模块及预握手功能默认禁用的回归测试 |
 | `.github/workflows/upstream-release.yml` | 选择最新 Release（含预发布）、打补丁、测试、Windows x64 编译及 Artifact；默认不公开 Release |
 | `docs/INSTALL-WINDOWS.md` | 用户操作、开关、默认内存上限与预算、回退 |
 | `docs/TECHNICAL.md` | 实现事实、设计取舍、验证状态、变更历史（必须随代码同步） |
@@ -80,7 +81,7 @@ target = 1.25 × (base + min(周期乱序字节计数增量, 256KiB))
     若 next > baseline 且通过进程级预算和低内存检查：设置 SO_RCVBUF(next)
 ```
 
-这里**没有固定为 1 MiB 或 2 MiB 的路径**。探索步骤用当前缓冲区的倍数表示，适用于 128KiB、512KiB、4MiB 等任何规模；当观测到接收量明显增长时重新允许一次探索，而平稳低吞吐数据不会持续无条件翻倍。探索前至少已接收一个当前缓冲区的数据量，这是一条按当前容量归一化的短流保护条件，而不是新引入某个固定 MiB 门槛。首次介入也受到 4 倍上限和预算限制；已有目标的缓存仍可在后续连接握手前设置之前学到的容量。
+这里**没有固定为 1 MiB 或 2 MiB 的路径**。探索步骤用当前缓冲区的倍数表示，适用于 128KiB、512KiB、4MiB 等任何规模；当观测到接收量明显增长时重新允许一次探索，而平稳低吞吐数据不会持续无条件翻倍。探索前至少已接收一个当前缓冲区的数据量，这是一条按当前容量归一化的短流保护条件，而不是新引入某个固定 MiB 门槛。首次介入也受到 4 倍上限和预算限制；**新版默认不在后续连接的握手前复用上次缓冲区容量**，仅在用户明确开启旧容量缓存实验后才如此操作。
 
 这项改变旨在让“接收窗口保持很大但仍不足以支撑 BDP”的连接不再被 70% 门槛错误拦截。代价是部分原本被旧门槛压制的连接会更早要求缓冲区、并可能导致不必要的 `setsockopt`；因此仍保留短流筛选、活动量要求、试探次数限制、冷却和预算，**暂不声称对所有网络一定更快**。
 
@@ -98,20 +99,26 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 - **申请/回收：** 任何 `SetReadBuffer` 前先预留预算，调用失败时回退预算；Socket 关闭或观察失败时释放预算。为了让预连接设置也遵守预算，`net.Dialer.Control` 的多个候选 fd 各自预留，拨号返回后释放未成功的候选，成功的 Socket 继续持有额度直到关闭。
 - 限制说明：WinSock 的真实内存分配和通告接收窗口不必等于 SO_RCVBUF 请求数，故预算是保守资源管理指标，无法替代 Windows TCP 内核的真实接收队列内存记账。
 
-## 5. 预连接缓存和并发 TCP 拨号
+## 5. Linux 启发的路径指标缓存与并发拨号
 
-命中目标缓存（保留 10 分钟，至多 256 个目标）时，使用 `net.Dialer.Control` **在 connect 前**应用上一次实际成功的缓冲区请求，可减少短连接来不及学习的问题。缓存同时记目标域名:端口和 TCP 实际远端 IP:端口。
+**v3.4 默认：历史 RTT 与每连接接收缓冲区独立。** Linux `net/ipv4/tcp_metrics.c` 的 `tcp_metrics` 保存的是部分目标路径指标（例如 RTT、RTT 波动、重排序和发送侧拥塞指标），而**不直接复用上一条 TCP 连接最终自动增长的 `SO_RCVBUF`**。本项目将这一设计原则实现为**简化的 RTT 路径缓存**，不声称完全实现 Linux 的 `tcp_metrics`。
 
-新版将 `winOptConnectState` 放进单次 `DialContext` 尝试，以互斥锁和 fd 映射记录可能并发的 IPv4/IPv6 候选。成功后取出实际胜出 Socket 的预算记录，其他候选释放；连接失败全部释放，迟到的 Control 回调也不应留下永久预算。该设计尚待在真实 Windows DNS 双栈及连接失败条件下验证。
+- `portable/history.go`：以拨号目标域名/IP:端口及连接实际对端 IP:端口为键，记录当前连接测得的 RTT（`SIO_TCP_INFO.RttUs`），使用整数 EWMA（新数据约 1/8 权重）平滑。10 分钟后过期，最多 256 条，过满时淘汰最早过期的条目；仅保留内存中，重启即清空；没有持久化 IP/域名历史文件。不同目标互不影响。
+- 新 TCP 连接**正常完成 Windows 握手后**，控制器才读取目标历史 RTT；它只在**本连接的 RTT 暂时为 0** 时作为接收量统计周期长度的提示，使有效样本不必从头等待。**不允许历史 RTT 单独触发 `SetReadBuffer`**，必须先取得当前连接真实有效的 `RttUs`，再经相同的短流筛选、需求公式、冷却期、低内存保护及预算执行扩容。
+- 默认的 `winOptBeforeConnect` **不再调用 `SO_RCVBUF`**。这消除了本补丁由于历史容量继承导致“缓存命中时 SYN 前设置不同缓冲区”的直接路径；**并不保证 SYN 包逐字节相同**，用户手动开启的 TCP 时间戳选项、系统状态和链路条件仍可能影响握手。
+- 保留旧版容量缓存作为 **显式 A/B 性能实验**：只有启动进程时设置 `XRAY_WINOPT_PRECONNECT_CACHE=on`（亦支持 `1/true/enabled`），才把成功设置的 `SO_RCVBUF` 容量记入旧表，并在同目标后续连接的 `net.Dialer.Control` 阶段、TCP `connect` 前恢复。默认关闭，可能导致不同的 SYN Window/Window Scale，亦可能提高短连接性能。不要把这个实验模式与 Linux `tcp_metrics` 等同。
+- 旧缓存仅在实验模式使用，仍有效期 10 分钟、最多 256 条、设置时受进程预算/低内存约束。关闭实验后重启，所有内存缓存立即清空。原有 `winOptConnectState` 保留，避免实验模式下并发 IPv4/IPv6 候选 Socket 遗留预算。默认没有预连接容量请求或相关预算预留。
+- 原始 `customSockopt` 显式配置 Windows `SO_RCVBUF` 时，仍以用户指定值优先；原版 UDP/SOCKS 入站/Vision Direct Copy 不变。**本缓存是客户端本地行为，不操作 VPS 或 Windows 全局 TCP 设置。**
 
-若原 Xray `customSockopt` 已明确配置 Windows `SO_RCVBUF`，我们不覆盖该用户选择。所有非 Windows 编译使用空实现；原版 UDP / SOCKS 入站 / Vision Direct Copy 不改。
+参考 Linux 实现：https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_metrics.c
 
 ## 6. 行为与配置
 
 | 环境变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `XRAY_WINOPT_MODE` | `portable`（空值，仅内部兼容标识） | `off` 关闭全部 Windows TCP 自适应修改；关闭后重启进程，既有 Socket 的设定不会自动撤回 |
-| `XRAY_WINOPT_LOG` | 空 | 设为 `1` 输出 `WINOPT expanded/preconnect/failed/pressure/tcp_timestamps` 等诊断日志 |
+| `XRAY_WINOPT_LOG` | 空 | 设为 `1` 输出 `WINOPT expanded/rtt_hint/preconnect/failed/pressure/tcp_timestamps` 等诊断日志 |
+| `XRAY_WINOPT_PRECONNECT_CACHE` | 空／关闭 | 默认只缓存历史 RTT、不在握手前继承上次缓冲区；仅设 `on` 时开启旧容量缓存与预握手 `SO_RCVBUF`，用于性能对照，可能改变 TCP SYN 的窗口特征 |
 | `XRAY_WINOPT_TCP_TIMESTAMPS` | 空（不改变 Windows 默认） | 可选 `on`/`off`，仅对该 Xray 默认拨号器创建的 TCP 连接、握手前设置 `TCP_TIMESTAMPS`；性能收益待验证 |
 | `XRAY_WINOPT_MAX_MIB` | **自动随物理内存** | 可指定 1..64 MiB 的单连接上限 |
 | `XRAY_WINOPT_BUDGET_MIB` | **自动随物理内存** | 可指定 32..2048 MiB 的进程请求预算 |
@@ -127,7 +134,7 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 ## 8. 当前验证状态
 
 - 用户报告：Windows 自适应版下载约 50 Mbps、手动固定 SO_RCVBUF=2 MiB 约 80 Mbps、Android 约 100 Mbps。不同客户端或不同时间的速率不足以单独证明 TCP 接收窗口是唯一瓶颈；当前没有同一轮逐连接调节日志、也不能据此推断 TCP 时间戳实验开关的收益。
-- v3.3 当前离线验证范围：通用控制器单测（含一个活跃 RTT 快速介入、400ms 冷却、需求驱动 4 倍单次上限、满通告窗口增长、容量扩展与内存上限、低流量过滤）、`go test ./portable ./recvwindow`、`go test -race ./portable ./recvwindow`、Windows amd64 `go build ./portable`、22 项 Python 补丁及仓库测试；真实 Windows 行为仍需验证。
+- v3.4 当前离线验证范围：通用控制器单测（含一个活跃 RTT 快速介入、400ms 冷却、需求驱动 4 倍单次上限、满通告窗口增长、容量扩展与内存上限、低流量过滤）、`go test ./portable ./recvwindow`、`go test -race ./portable ./recvwindow`、Windows amd64 `go build ./portable`、22 项 Python 补丁及仓库测试；真实 Windows 行为仍需验证。
 - 尚未验证：v3.2 通用增长策略在真实 Xray 中是否提速、最新真实 Xray 完整源码编译、新版时间戳设置在 Windows 11 的有效性；`GlobalMemoryStatusEx` / `SIO_TCP_INFO` 的完整边界行为、IPv4/IPv6 Happy Eyeballs、短连接／断线后的预算释放、VLESS+REALITY+Vision 握手及实测速度。
 - 风险：Linux 原生语义不可完全移植、`BytesIn` 作为应用读取量替身可能偏差较大、较长连接的持续轮询有额外开销、Windows 设置 SO_RCVBUF 后可能出现无法再缩小的限制、内存预算并非实际内存使用量、不同网络拥堵下策略可能误判。
 - 验收建议：在相同网络环境比较原版默认、原版固定 1MiB、本版自适应优化，观察 CPU/内存/并发以及测速下载速度；不应宣称已超过 Linux 或已修复 Windows 内核。
@@ -135,6 +142,17 @@ Linux 使用 `tcp_rmem[2]` 和内核内存压力判定，Windows 没有对等应
 ## 9. 维护规则与逐次变更记录
 
 每次提交修改任何实现／测试／工作流／安装方式时，**同一提交范围内更新本文的相关章节和本节**。README 只描述用途、安装及重要风险。
+
+### 2026-10-30 — v3.4：缓存目标 RTT，不再默认继承上一连接缓冲区
+
+- **动机与设计依据：** Linux `tcp_metrics` 跨连接记忆路径 RTT、部分拥塞/乱序指标，但接收缓冲区的实际增长独立发生在每条连接内。旧 Xray-WinOptimize 在热连接 `connect` 前复用上次 `SO_RCVBUF` 可能带来新的初始 SYN Window/Window Scale 差异；本版默认取消这种容量继承。
+- **变更文件：** 新增 `portable/history.go`、`portable/history_test.go`；修改 `portable/socket_windows.go`（历史 RTT 采样、握手后参考、旧缓存显式开关）、`portable/controller.go`/`controller_test.go`（RTT 缺失时的观察提示及安全约束）、`patch/apply_portable.py`（新模块随上游补丁复制）、`tests/test_portable_patcher.py`（自动补丁验证）；同步更新 `README.md`、`README.en.md`、`docs/INSTALL-WINDOWS.md`、`docs/FINGERPRINT-AUDIT.md` 与本文。
+- **新默认逻辑：** 记录目标和实际对端的短期 RTT EWMA（10 分钟、最多 256 条），仅在新连接**完成握手之后**提供给控制器；当 `SIO_TCP_INFO.RttUs=0` 时允许历史 RTT 用于确定测量周期，但**不能据此调用 `SO_RCVBUF`**，直到当前连接测得有效 RTT 并通过自身流量判断；默认握手前无历史容量配置。
+- **旧行为开关：** `XRAY_WINOPT_PRECONNECT_CACHE=on` 临时允许原有容量缓存及握手前设置，仅供性能 A/B；默认关闭。切换时重启 Xray。显式用户 `SO_RCVBUF` 仍优先。
+- **不变：** v3.3 Fast Ramp 公式、单步最多按需四倍、`max(RTT,400ms)` 冷却、首次活动量/RTT 筛选、有限探测、低内存/进程预算与 TCP 时间戳默认不覆盖。仍使用 Windows TCP，没有 Linux TCP 栈移植，也不会使服务器端改变 BBR。
+- **风险/性能：** 短时间多连接下载可能比旧版慢；RTT 历史可能失效，故它不能直接批准扩容。SYN 指纹差异的减少属于静态代码推导，不是 Windows PCAP 实测，**不能保证防止被动检测**。实验开关 `on` 可回退旧缓存行为，完全回退可使用原版 Xray 或 `XRAY_WINOPT_MODE=off`。
+- **验证范围：** Go 历史缓存/首次 RTT 测量回归、race 检查、Windows amd64 交叉编译、Python 补丁检查；完整上游 Xray 构建和 Windows 实机抓包/速度需要 GitHub Actions 与本机验证。
+
 
 ### 2026-10-30 — 项目术语校正：明确为“借鉴 Linux 设计”
 
@@ -702,3 +720,9 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 - [Windows 实验安装手册](INSTALL-WINDOWS.md)。
 
 **交接原则：** 上面的代码位置与参数以本仓库当前源码为准；外部上游源码、驱动版本和运行环境发生变化时，必须重新验证，不能沿用旧版本的“已通过”结论。
+
+## 安全审计补充（2026-10-30，静态代码与被动指纹风险）
+
+新增独立文档 [`docs/FINGERPRINT-AUDIT.md`](FINGERPRINT-AUDIT.md)，审核默认 Winsock 后端与早期 WinDivert 实验构建的差异，说明冷连接、目标缓存热连接和可选 TCP 时间戳三种情况下的被动指纹面，提供不依赖服务器 SSH 的 Windows `pktmon` 抓包对照流程，并明确证据边界。
+
+**本次仅新增文档，不改变任何 Go 代码、缓冲区增长算法或 GitHub Actions。** 已确认在默认模式中 TIME_STAMPS 不主动设置；10min 目标缓存可能在握手前改变 Socket 选项，属于需要 PCAP 核查的潜在风险。尚未获得 SYN/ACK 抓包及 GFW 规则实证，不得对外宣称“无指纹”或“保证不可检测”。

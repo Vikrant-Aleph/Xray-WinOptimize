@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the portable no-driver Windows TCP autotuning patch to clean Xray.
+"""Apply the no-driver Windows TCP autotuning patch to clean Xray.
 
 Strict anchors: fail if an upstream release changes the dialer structure.
 Does not apply the independent WinDivert experimental TCP-stack patch.
@@ -49,7 +49,7 @@ def apply(root: Path, repo: Path):
     if not dialer.is_file() or not (root/'go.mod').is_file():
         raise RuntimeError('not Xray source: transport/internet/system_dialer.go or go.mod missing')
     destdir = dialer.parent
-    files = ['controller.go', 'quota.go', 'socket_windows.go', 'socket_other.go']
+    files = ['controller.go', 'quota.go', 'history.go', 'socket_windows.go', 'socket_other.go']
     for filename in files:
         if (destdir/('winopt_'+filename)).exists():
             raise RuntimeError(f'patch previously applied, or conflicting file: {filename}')
@@ -100,7 +100,7 @@ func winOptExplicitRcvbuf(sockopt *SocketConfig) bool {return false}
         (destdir/('winopt_'+filename)).write_text(code,encoding='utf-8')
     (destdir/'winopt_sockopts_windows.go').write_text(helpers,encoding='utf-8')
     (destdir/'winopt_sockopts_other.go').write_text(helper_other,encoding='utf-8')
-    print('Applied portable Windows TCP receive controller; default mode=portable, no driver.')
+    print('Applied Windows TCP receive controller; default path-metrics cache, no preconnect SO_RCVBUF, no driver.')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)

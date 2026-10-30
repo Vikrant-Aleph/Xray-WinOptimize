@@ -44,6 +44,7 @@ type winOptController struct {
 	lastProbe     time.Time
 	flatProbes    int
 	reorderHint   uint64
+	rttHint       time.Duration // only for sampling before this connection measures RTT
 }
 
 const (
@@ -82,7 +83,11 @@ func winOptNewController(maxBytes uint32) winOptController {
 // the adjustment cooldown, and accept up to 4x when *measured demand*
 // warrants it. The existing per-socket and process memory bounds remain.
 func (c *winOptController) Observe(s winOptSample) uint32 {
-	if s.At.IsZero() || s.RTT <= 0 || s.RcvBuf == 0 {
+	cycleRTT := s.RTT
+	if cycleRTT <= 0 {
+		cycleRTT = c.rttHint
+	}
+	if s.At.IsZero() || cycleRTT <= 0 || s.RcvBuf == 0 {
 		c.last = s
 		c.ready = true
 		c.roundReady = false
@@ -110,7 +115,7 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 		return 0
 	}
 	// SIO_TCP_INFO's RTT is an imperfect proxy for Linux's receiver RTT.
-	roundLength := s.RTT
+	roundLength := cycleRTT
 	if roundLength < 100*time.Millisecond {
 		roundLength = 100 * time.Millisecond
 	}
@@ -123,6 +128,12 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 		reordered = uint64(s.BytesReordered - c.roundStart.BytesReordered)
 	}
 	c.roundStart = s
+	// A cached RTT only allows earlier measurement. Never decide to change
+	// SO_RCVBUF until the active connection reports its own valid RTT.
+	if s.RTT <= 0 {
+		c.previousRound = bytesThisRound
+		return 0
+	}
 	if bytesThisRound < winOptMinRoundBytes {
 		c.previousRound = bytesThisRound
 		return 0
@@ -199,6 +210,15 @@ func (c *winOptController) Observe(s winOptSample) uint32 {
 		return 0
 	}
 	return proposal
+}
+
+// SetRTTHint supplies a bounded path-metric hint for *observation timing*.
+// A historical RTT never authorizes a buffer increase by itself; growth
+// always requires a valid RTT sample from the current TCP connection.
+func (c *winOptController) SetRTTHint(hint time.Duration) {
+	if hint >= time.Millisecond && hint <= 10*time.Second {
+		c.rttHint = hint
+	}
 }
 
 func (c *winOptController) Applied(bytes uint32, at time.Time) {

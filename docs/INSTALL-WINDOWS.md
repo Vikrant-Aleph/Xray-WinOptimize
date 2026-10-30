@@ -16,7 +16,9 @@
 
 - 默认自适应优化：未设置 `XRAY_WINOPT_MODE`，或设置为 `portable`。针对 Xray 默认拨号器发起的 TCP 出站，连接初始不强制缓冲大小。按接收 RTT 周期分析持续下载，短流不介入；首次和后续均按**借鉴 Linux 设计**的 RTT 周期接收量及增长趋势策略决定缓冲区，没有固定 1 MiB/2 MiB 探测；上限与内存预算由系统物理内存决定。
 - 禁用：`$env:XRAY_WINOPT_MODE='off'`，随后**重启 Xray**，新连接恢复 Windows 原生 TCP 行为。
-- 日志：`$env:XRAY_WINOPT_LOG='1'`，打印 `WINOPT ...` 调整事件；请勿在公开日志中泄露 VPS IP 或配置密钥。
+- 目标历史：默认仅在内存中保存最近 10 分钟的 RTT 参考数据；新的 TCP 连接**不会**自动继承上一条连接的 `SO_RCVBUF`，握手前保持 Windows 原生缓冲区设置。历史 RTT 只用于当前连接尚未取得 RTT 时的观察周期，不能单独触发扩容。
+- 可选旧容量缓存：需要性能 A/B 时，启动前设 `$env:XRAY_WINOPT_PRECONNECT_CACHE='on'` 并重启 Xray；同目标后续连接会尝试在握手前复用上次成功的缓冲区。若不需要这一实验，清除该变量并重启：`Remove-Item Env:XRAY_WINOPT_PRECONNECT_CACHE -ErrorAction SilentlyContinue`。该模式可能改变 SYN 中的窗口指纹，默认关闭。
+- 日志：`$env:XRAY_WINOPT_LOG='1'`，打印 `WINOPT expanded/rtt_hint/preconnect ...` 事件；请勿在公开日志中泄露 VPS IP 或配置密钥。
 - 单连接最大缓冲区：**默认自动根据 RAM 容量确定**（4～32 MiB）；可设置 `$env:XRAY_WINOPT_MAX_MIB='16'` 固定上限（支持 1～64 MiB）。
 - 进程请求预算：默认随 RAM 容量变化（64～512 MiB），可设置 `$env:XRAY_WINOPT_BUDGET_MIB='128'` （支持 32～2048 MiB）；物理内存不足时跳过新的缓冲区扩容。
 - 已显式指定 `customSockopt` 的 Windows `SO_RCVBUF` 的连接被跳过。
@@ -27,7 +29,7 @@
 
 旧版本的 `$env:XRAY_WINOPT_GROWTH='aggressive'` 在本版不再生效，无须设置或保留。如需对照完全没有补丁的 TCP 行为，设置 `$env:XRAY_WINOPT_MODE='off'` 并重启 Xray；如需对照上一版算法，请使用上一版二进制文件。
 
-可设置 `$env:XRAY_WINOPT_LOG='1'` 查看实际调整日志（`WINOPT expanded ... set=...`），但该日志仅确认请求成功，不表示吞吐一定提高。这版是 v3.3 Fast Ramp，已取消首次额外等待第二个活跃 RTT 统计周期；保持 RTT≥40ms、累计 128KiB、单周期至少 32KiB 的初筛，并维持相同的内存预算与低内存保护。更快增长也可能增加内存压力，尚需 Windows 实机验证。详见 [TECHNICAL.md](TECHNICAL.md)。
+可设置 `$env:XRAY_WINOPT_LOG='1'` 查看实际调整日志（`WINOPT expanded ... set=...`），但该日志仅确认请求成功，不表示吞吐一定提高。这版保留 v3.3 Fast Ramp 的增长公式，并采用 v3.4 的路径指标缓存设计，已取消首次额外等待第二个活跃 RTT 统计周期；保持 RTT≥40ms、累计 128KiB、单周期至少 32KiB 的初筛，并维持相同的内存预算与低内存保护。更快增长也可能增加内存压力，尚需 Windows 实机验证。详见 [TECHNICAL.md](TECHNICAL.md)。
 
 ## 可选的 TCP 时间戳对照（默认不改变）
 
@@ -70,6 +72,6 @@ go build -trimpath -buildvcs=false -o xray-winopt.exe ./main
 ## 尚未验证／风险
 
 - 独立 Go 模块、补丁测试和 Windows amd64 交叉编译检查通过；完整 Xray 编译和 Windows 11 实际连接尚未完成验证。
-- 中途增大 SO_RCVBUF 不一定能立即改变窗口缩放；新建连接的预握手缓存可能更有效。
+- 中途增大 SO_RCVBUF 不一定能立即改变握手时已确定的窗口缩放。默认不启用预握手容量缓存，是为了避免跨连接容量复用可能引入的握手差异；旧模式需显式开启，可能以性能换取更少的初始握手一致性。
 - 不是 Linux TCP 栈，不直接修改 Windows ACK/SACK/丢包恢复；不保证超过已实测的固定 1 MiB 速度。
 - 回退始终是停止进程，用原版 `xray.exe` 和原配置启动；不修改 Windows 全局设置。

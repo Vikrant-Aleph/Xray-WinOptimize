@@ -48,6 +48,8 @@ class PortablePatcherTests(unittest.TestCase):
             self.assertEqual((file.parent/'system_dialer.go.winopt.orig').read_text(),DIALER)
             self.assertTrue((file.parent/'winopt_socket_windows.go').exists())
             self.assertTrue((file.parent/'winopt_quota.go').exists())
+            self.assertTrue((file.parent/'winopt_history.go').exists())
+            self.assertIn('!winOptPreconnectCapacityEnabled(os.Getenv("XRAY_WINOPT_PRECONNECT_CACHE"))', (file.parent/'winopt_socket_windows.go').read_text())
             self.assertTrue((file.parent/'winopt_sockopts_other.go').exists())
             with self.assertRaises(RuntimeError):module.apply(root,repo)
 
