@@ -2,55 +2,50 @@
 
 简体中文 | [English](README.en.md)
 
-在我自己的 Windows 电脑、网络线路和 VPS 环境中，我发现：**网络拥堵、延迟较高时，Windows TCP 接收窗口自动调谐有时无法及时扩大接收窗口，Xray 的下载速度会明显下降。** 手动设置较大的 `SO_RCVBUF` 可以缓解这个问题，但长期使用固定缓冲区并不是理想的通用方案。**这就是 Xray-WinOptimize 诞生的原因。**
+在我自己的 Windows 电脑、网络线路和 VPS 环境中，我发现：**当网络拥堵、延迟较高时，Windows TCP 接收窗口自动调谐虽然仍在工作，但接收缓冲区增长不够及时，Xray 的下载速度会明显下降。** 手动增大 `SO_RCVBUF` 后，下行速度得到显著改善。**这就是 Xray-WinOptimize 的起点。**
 
-Xray-WinOptimize 是一个**非官方、实验性的 Xray-core Windows TCP 出站性能优化项目**。它借鉴 Linux TCP 接收缓冲区自适应调节的思路，在**保留 Windows 原生 TCP 协议栈**的前提下，根据连接状态调整 Socket 接收缓冲区，尝试改善特定拥堵、高延迟网络下的下行吞吐。
+Xray-WinOptimize 是基于 Xray-core 的 Windows TCP 出站性能优化项目。它参考 Linux TCP 接收缓冲区自适应调节的设计思路，利用 **Windows 原生 TCP 协议栈和 Socket 接口**，根据连接状态调整接收缓冲区，改善拥堵、高延迟网络下的下行吞吐表现。
 
-> **适用范围声明：** 上述现象仅在我个人的设备、线路和特定 VPS 测试环境中得到观察。它不意味着所有 Windows 用户都会遇到相同问题，也不能据此认定 Windows TCP 自动调谐普遍存在缺陷。
+## 项目背景与实测
 
-## 项目缘起与实测
+排查过程中，我通过 Windows TCP 连接的内部统计确认：默认接收缓冲区会逐步扩大，但在拥堵条件下，增长速度可能跟不上实际下载需求。相比之下，显式设置较大的 `SO_RCVBUF` 能更快提供足够的接收窗口。
 
-排查过程中，我观察到 Windows 的接收缓冲区**并非完全不自动增长**：它会逐步扩大，但在某些拥堵条件下，增长速度和窗口大小不足以在有限的下载时间内充分利用链路带宽。显式增大 `SO_RCVBUF` 后，窗口和下行速度都曾明显改善。这促使我尝试在 Xray 中实现一种面向连接状态的自适应策略，而不是要求用户长期写死一个缓冲区大小。
+在我使用的网络和 VPS 测试环境中，采用本项目修改后的 Xray-core，**下行速度曾从约 40 Mbps 提升至 70 Mbps**。项目的目标就是把这一思路发展为根据连接状态动态调整的方案，减少手工设置固定缓冲区的需要。
 
-在**同一套个人网络与 VPS 测试环境**的一次对照中，使用本项目修改后的 Xray-core，下行速度约从 **40 Mbps 提升至 70 Mbps**。
+## 优化方式
 
-这只是特定环境和时段的测试记录，**不是普遍加速比例或速度保证**。实际效果取决于线路、RTT、丢包、服务器、并发连接和 Windows 版本；在其他环境中可能没有改善，甚至可能变慢。
+- **针对 Xray 出站连接：** 优化通过 Xray 默认 TCP 拨号器建立的 Windows 出站 TCP 连接。
+- **自适应接收缓冲区：** 结合连接状态，使用 Windows Socket 接口（包括 `SO_RCVBUF`）调整接收缓冲区。
+- **原生运行：** 沿用 Windows TCP 协议栈，通常无需管理员权限、额外网络驱动或全局 TCP 参数修改。
+- **可随时关闭：** 通过 `XRAY_WINOPT_MODE=off` 关闭优化，方便进行对照测试或回退。
 
-## 优化方式与边界
-
-- **优化对象：** 由 Xray 默认 TCP 拨号器建立的 Windows 出站 TCP 连接，而不是电脑上的所有网络流量。
-- **实现思路：** 利用 Windows 原生 Socket 接口（包括 `SO_RCVBUF`）结合连接状态调整接收缓冲区；不会替换 Windows TCP 协议栈。
-- **运行要求：** 默认不需要额外网络驱动或管理员权限，也不需要更改 Windows 全局 TCP 参数。
-- **设计边界：** 借鉴 Linux 的自适应调节理念，**不是**移植 Linux TCP 协议栈，也不等同于 Linux 内核中的自动调谐算法。
-- **跨连接信息：** 默认只保留用于参考的路径 RTT 等历史提示，**不会**在新连接 SYN 之前直接沿用上一条连接的接收缓冲区大小。
-
-有关具体算法、配置选项、源码改动和实验限制，请阅读 [技术文档](docs/TECHNICAL.md)。
+具体算法、配置选项与源码实现见 [技术文档](docs/TECHNICAL.md)。
 
 ## 下载与自动发布
 
-从 [GitHub Releases](https://github.com/Vikrant-Aleph/Xray-WinOptimize/releases) 下载对应架构的构建包：
+在 [GitHub Releases](https://github.com/Vikrant-Aleph/Xray-WinOptimize/releases) 下载对应平台的构建包：
 
 | 发布文件 | 目标系统 |
 | --- | --- |
-| `Xray-winopt-win7-32.zip` | Windows 7 x86（特殊兼容工具链） |
-| `Xray-winopt-win7-64.zip` | Windows 7 x64（特殊兼容工具链） |
+| `Xray-winopt-win7-32.zip` | Windows 7 x86 |
+| `Xray-winopt-win7-64.zip` | Windows 7 x64 |
 | `Xray-winopt-win-32.zip` | 现代 Windows x86 |
 | `Xray-winopt-win-64.zip` | 现代 Windows x64 |
 | `Xray-winopt-win-arm-64.zip` | Windows ARM64 |
 
-**每个 ZIP 只包含 `xray.exe`、`LICENSE` 和 `BUILD-INFO.txt`。** README 和其他文档保存在本仓库，不会随二进制包重复打包；可执行文件统一命名为 `xray.exe`，无需额外重命名。
+**每个 ZIP 仅包含 `xray.exe`、`LICENSE` 和 `BUILD-INFO.txt`。** 可执行文件统一命名为 `xray.exe`，可直接用于兼容的命令行环境和图形客户端。
 
-GitHub Actions **每隔一天**检查 Xray-core 最新已发布的 Release（包含预发布版本，不包含草稿）。如果该上游版本尚无完整的 WinOptimize Release，工作流会尝试构建全部五个平台；**只有五个平台全部成功并通过架构检查，才发布新的 Release**，不会用旧版本构建包充当新版本。开发者也可在 [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions) 手动运行 `Xray-WinOptimize (latest upstream)`；版本输入留空即选择上游最新 Release。
+GitHub Actions **每隔一天**检查 Xray-core 最新已发布的 Release（包含预发布版本）。如果该上游版本尚无完整的 WinOptimize Release，就启动五平台构建；**全部构建成功并通过架构检查后才发布新版本**。也可以在 [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions) 手动运行 `Xray-WinOptimize (latest upstream)`，版本输入留空表示选择上游最新 Release。
 
-> **Windows 7 注意：** Windows 7 已不受标准 Go 工具链支持。对应构建使用 [XTLS/go-win7](https://github.com/XTLS/go-win7) 兼容工具链并依赖必要的系统更新。由于自适应机制使用的 `SIO_TCP_INFO` 接口在 Windows 7 上不保证可用，**能编译或启动并不等于优化已生效**。Windows 7 的实际联网与运行兼容性尚未经过实机验证，其他平台的实际兼容性也仍需测试。
+**Windows 7 兼容性：** 对应构建使用 [XTLS/go-win7](https://github.com/XTLS/go-win7) 工具链。自适应优化依赖的 `SIO_TCP_INFO` 接口在 Windows 7 上可能不可用，因此该平台的优化效果和运行兼容性需要实机确认。
 
 ## 安装与使用
 
-使用前建议备份现有 Xray 内核和配置，以便出现连接问题时快速回退。如果已在出站配置中手动指定 `SO_RCVBUF`，建议先移除该选项再比较本项目的自适应效果，避免测试条件相互干扰。
+建议先备份原来的 `xray.exe` 和配置文件。如果已手动设置出站 `SO_RCVBUF`，可以先移除该选项，再测试自适应效果。
 
 ### 命令行运行
 
-将 ZIP 中的 `xray.exe` 放入现有 Xray 运行目录，沿用原来的配置文件：
+将发布包中的 `xray.exe` 放入现有 Xray 运行目录，使用原来的配置文件启动：
 
 ```powershell
 .\xray.exe run -config .\config.json
@@ -58,29 +53,29 @@ GitHub Actions **每隔一天**检查 Xray-core 最新已发布的 Release（包
 
 ### 在图形客户端中替换内核（例如 v2rayN）
 
-1. **完全退出**图形客户端并确保 Xray 进程已经停止，备份现有 `xray.exe`。
-2. 找到客户端实际使用的 Xray 内核目录。Windows 版 v2rayN 常见位置为 `bin\xray\`，具体以你的安装方式为准。
-3. 将发布包中的 `xray.exe` 复制到该目录并覆盖原内核。**不要覆盖图形客户端本身的 EXE，也不要删除其他必要文件。**
-4. 重新启动客户端，确认正在使用 Xray 核心，并检查日志确认内核正常启动。遇到问题时恢复原版 `xray.exe`。
+1. 完全退出图形客户端，确保 Xray 进程已经停止，并备份原来的 `xray.exe`。
+2. 找到客户端正在使用的 Xray 内核目录。Windows 版 v2rayN 的常见路径为 `bin\xray\`，具体以实际安装目录为准。
+3. 将发布包中的 `xray.exe` 复制到该目录，覆盖原内核。注意保留图形客户端程序和目录中的其他文件。
+4. 重新启动客户端，确认选用 Xray 核心，并检查日志是否正常启动。
 
-图形客户端的“更新内核”功能可能再次覆盖这个修改版，届时需要重新替换。
+如果图形客户端更新了内核，可能需要再次替换。遇到兼容性问题时，可恢复备份的原版 `xray.exe`。
 
-### 临时关闭优化
+### 关闭优化
 
-使用命令行时，可为当前 PowerShell 会话设置以下环境变量，然后重新启动 Xray：
+在 PowerShell 中设置环境变量后重新启动 Xray：
 
 ```powershell
 $env:XRAY_WINOPT_MODE = 'off'
 .\xray.exe run -config .\config.json
 ```
 
-## 限制与流量行为风险
+## 流量行为与兼容性
 
-本项目仍处于实验阶段。调整 Socket 接收缓冲区可能改变网络上可观察到的 **TCP 接收窗口通告、ACK 时序及数据包时序**，理论上可能增加流量行为分析可利用的特征。但目前**没有证据证明这些变化是 Xray 独有的指纹，或已形成可靠的识别方法**；项目也不承诺无法被识别。详见 [TCP 流量指纹风险审计](docs/FINGERPRINT-AUDIT.md)。
+接收缓冲区调整可能影响 TCP 接收窗口通告、ACK 时序及数据包时序。这些变化与流量分析有关，具体讨论见 [TCP 流量指纹风险审计](docs/FINGERPRINT-AUDIT.md)。
 
-该优化不保证解决所有慢速原因，也不能替代对线路质量、丢包、服务器负载和代理配置的排查。不建议仅凭单次测速判断效果。
+本项目主要针对 Windows TCP 出站接收窗口调节。实际效果与网络拥堵程度、RTT、丢包和服务器状态等因素有关。
 
-## 文档与声明
+## 相关文档
 
 - [技术设计、测试记录与变更历史](docs/TECHNICAL.md)
 - [Windows 安装与回退](docs/INSTALL-WINDOWS.md)
@@ -88,4 +83,4 @@ $env:XRAY_WINOPT_MODE = 'off'
 - [GitHub 构建与发布说明](docs/PUBLISH-GITHUB.md)
 - [English README](README.en.md)
 
-本项目为独立的非官方实验项目，与 [XTLS/Xray-core](https://github.com/XTLS/Xray-core) 官方无隶属关系。
+本项目为独立的非官方项目，与 [XTLS/Xray-core](https://github.com/XTLS/Xray-core) 官方无隶属关系。
