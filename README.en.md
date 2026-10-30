@@ -1,19 +1,38 @@
 # Xray-WinOptimize
 
-An unofficial Windows performance optimization project for Xray-core. It draws on Linux TCP receive-buffer autotuning design principles to implement its own adaptive receive-buffer growth policy for Windows TCP outbound connections.
+**An experimental, unofficial Windows TCP outbound performance optimization for Xray-core.** Inspired by Linux TCP receive-buffer autotuning design principles, the project adapts Windows socket receive-buffer requests to connection conditions while retaining the native Windows TCP stack. It does **not** port the Linux TCP stack or reproduce Linux kernel autotuning.
 
-The default build uses Windows native TCP without requiring administrator privileges or extra network drivers. It does **not** port the Linux TCP stack, replicate the Linux kernel autotuning algorithm, or guarantee a throughput gain in all environments. Experimental status.
+## Scope of the observation
 
-### Download and run
+**The reported problem with Windows receive-window autotuning under congestion has only been observed by the project author on their own Windows machine, network, and particular VPS setup.** It must not be generalized to all Windows installations or networks, or presented as proof of a widespread Windows TCP defect.
 
-1. Open **Actions → Xray-WinOptimize (latest upstream)** and manually run the workflow. Leave the version blank to use the latest Xray upstream Release, including prereleases.
-2. Download the successful Artifact, unpack `xray-winopt.exe` and remove any manually configured `SO_RCVBUF` from your Xray configuration.
-3. Run normally:
+**In that specific congested network and VPS test setup**, the author observed download throughput increasing from approximately **40 Mbps to 70 Mbps** when using the modified core. This is **one environment's observation**, not a benchmark applicable to other users or a promised performance improvement. Results may be unchanged or worse elsewhere.
 
-   ```powershell
-   .\xray-winopt.exe run -config .\config.json
-   ```
+## Important caveats
 
-By default, short-lived path RTT observations may be reused *after* a connection is established, but the previous connection's receive-buffer size is not applied before SYN. For an explicit legacy performance comparison only, set `XRAY_WINOPT_PRECONNECT_CACHE=on` before launch (this may alter TCP handshake window characteristics). To disable optimization, set `XRAY_WINOPT_MODE=off` before launch. For connection-level TCP timestamp experimentation, set `XRAY_WINOPT_TCP_TIMESTAMPS=on` (default: do not modify timestamps). Enable logging with `XRAY_WINOPT_LOG=1`. Timestamp changes are **not** proven to improve speed.
+- The default build still uses Windows' native TCP stack and ordinarily requires no administrator privileges or network drivers. The optimization applies to outbound connections using Xray's default TCP dialer, **not all traffic on Windows**.
+- Changing socket receive-buffer management may subtly affect **advertised TCP receive windows, ACK timing, and packet timing**, potentially exposing additional traffic-behavior features to passive observers. It has **not** been demonstrated that these changes are unique to Xray or that they enable a reliable classifier; the project does **not** promise unidentifiability. See the [fingerprint security audit](docs/FINGERPRINT-AUDIT.md).
+- This remains experimental. Back up the existing core and configuration. For a fair adaptive test, remove manually configured outbound `SO_RCVBUF` options.
 
-See [technical design and change log](docs/TECHNICAL.md), [Windows setup](docs/INSTALL-WINDOWS.md), and [publishing](docs/PUBLISH-GITHUB.md). The separate WinDivert TCP backend remains an optional research path and is not part of the standard executable.
+## Download and run
+
+From **Actions → Xray-WinOptimize (latest upstream)**, click **Run workflow**. Leave the upstream version empty to build against the latest upstream Xray Release, including prereleases. Download the successful **Artifact** and unpack `xray-winopt.exe`.
+
+**Command line:**
+
+```powershell
+.\xray-winopt.exe run -config .\config.json
+```
+
+**Graphical clients (e.g. v2rayN):**
+
+1. Fully exit the client and stop the Xray process. Back up the existing `xray.exe`.
+2. Locate the Xray core used by the client (commonly `bin\xray\xray.exe` within a Windows v2rayN installation; layouts vary).
+3. Rename `xray-winopt.exe` to **`xray.exe`** and replace the core binary only. Do not replace the GUI program or delete other core assets.
+4. Restart the client, select the **Xray** core if necessary, and confirm startup in its logs. Restore the backed-up core if anything fails.
+
+A GUI client's own **Update Core** action may overwrite the modified binary and require replacing it again.
+
+To disable the optimization for a command-line run, set `XRAY_WINOPT_MODE=off` and restart the process. The default cross-connection cache retains RTT path hints, **not** the previous connection's receive-buffer size before SYN.
+
+See [technical documentation and change history](docs/TECHNICAL.md), [Windows setup](docs/INSTALL-WINDOWS.md), [traffic fingerprint audit](docs/FINGERPRINT-AUDIT.md), and [publishing instructions](docs/PUBLISH-GITHUB.md). Not affiliated with the official [XTLS/Xray-core](https://github.com/XTLS/Xray-core) project.
