@@ -654,3 +654,9 @@ go build -trimpath -buildvcs=false -o xray-winrecv-experimental.exe ./main
 - **验证：** 已执行 YAML 解析、四阶段和五平台矩阵结构检查、时区换算；GitHub 实际定时触发与五平台构建仍需线上验证。
 - **兼容性与风险：** GitHub 计划任务可能延迟或偶发未触发，不作为严格的秒级任务调度。
 - **回退方法：** 将 cron 改回原规则并同步修改本文。
+
+## 2026-11-01 — 修复每日定时变更遗漏的 CI 断言
+- **原因：** `upstream-release.yml` 已调整为每天 UTC 04:00（北京时间 12:00）执行，但 `tests/test_multi_windows_release.py` 仍断言工作流包含过时的 `*/2 * *` 字符串。手动触发时成功选中 Xray-core `v26.10.31`，随后的 Python 测试 30 项中仅此项失败，使流水线停在 `Validate patch against selected Xray source`，未进入五平台构建。
+- **修改文件：** `tests/test_multi_windows_release.py` 与本文。将旧隔日检查断言替换为对 `cron: '0 4 * * *'` 实际配置行的校验，保留五种目标平台、ZIP 内容、架构校验及发布完整性测试。
+- **保持不变：** 自动检查时间、上游版本选择、五平台编译、Release 发布策略、Windows TCP 接收优化算法和发布包结构。
+- **验证与边界：** 已验证新断言能识别现行每日 UTC 04:00 规则，并拒绝旧隔日规则；此前线上运行其余 29 项 Python 测试通过。修复后的全流程需在 GitHub Actions 上重新运行，不能据此声称 Windows 7 工具链或五平台编译已经成功。
