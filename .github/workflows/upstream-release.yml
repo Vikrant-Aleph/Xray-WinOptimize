@@ -1,9 +1,9 @@
 name: Xray-WinOptimize (latest upstream)
 
 on:
-  # UTC: check every other calendar day. GitHub can delay scheduled runs.
+  # Run daily at 12:00 Asia/Shanghai (UTC+08:00 = 04:00 UTC). GitHub may delay scheduled runs.
   schedule:
-    - cron: '37 4 */2 * *'
+    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -16,14 +16,12 @@ on:
         required: false
         type: boolean
         default: false
-
 permissions:
   contents: write
 
 concurrency:
   group: xray-winopt-release
   cancel-in-progress: false
-
 jobs:
   select:
     name: Check latest upstream and existing assets
@@ -87,7 +85,6 @@ jobs:
             echo "release=$release"
             echo "build=$build"
           } >> "$GITHUB_OUTPUT"
-
   verify-patch:
     name: Validate patch against selected Xray source
     needs: select
@@ -115,7 +112,6 @@ jobs:
           python3 patch/apply_portable.py xray-src
           gofmt -w xray-src/transport/internet/system_dialer.go
           gofmt -w xray-src/transport/internet/winopt_*.go
-
   build-windows:
     name: Build ${{ matrix.target }}
     needs: [select, verify-patch]
@@ -203,7 +199,6 @@ jobs:
           path: dist/Xray-winopt-${{ matrix.target }}.zip
           if-no-files-found: error
           retention-days: 14
-
   publish:
     name: Publish complete five-platform Release
     needs: [select, verify-patch, build-windows]
@@ -225,14 +220,12 @@ jobs:
           python3 scripts/verify_release.py dist --checksums dist/SHA256SUMS.txt
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           Xray-WinOptimize（非官方实验构建），基于 Xray-core ${UPSTREAM_TAG}。
-
           五个平台：win7-32 / win7-64 / win-32 / win-64 / win-arm-64。
           每个压缩包仅含 xray.exe、LICENSE 和 BUILD-INFO.txt，可用于替换图形化客户端对应架构的内核。中英文项目说明和技术文档保留在 GitHub 仓库，不随二进制包附带。
 
           **特别提醒**：Windows 7 使用 XTLS/go-win7 兼容编译器；本项目依赖的 SIO_TCP_INFO 在 Windows 7 上并无可靠可用性保证，因此 Win7 包不能承诺自适应接收窗口功能实际生效，系统必须满足 patched Go 的更新前提。普通 Windows 包也尚需对应系统实机验证。
 
           本项目的网络优化只在作者特定环境测得过改善，不保证所有网络提速；修改 TCP 接收窗口可能带来被动可观察的流量特征。见仓库 README 和 docs/TECHNICAL.md。
-
           本次自动流程验证了源码补丁、编译和 PE 架构；不代表五种平台已经完成真实联网、REALITY 或性能验证。
           EOF
       - name: Publish to GitHub Release

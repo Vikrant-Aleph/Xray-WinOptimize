@@ -35,7 +35,7 @@ Xray-WinOptimize 是基于 Xray-core 的 Windows TCP 出站性能优化项目。
 
 **每个 ZIP 仅包含 `xray.exe`、`LICENSE` 和 `BUILD-INFO.txt`。** 可执行文件统一命名为 `xray.exe`，可直接用于兼容的命令行环境和图形客户端。
 
-GitHub Actions **每隔一天**检查 Xray-core 最新已发布的 Release（包含预发布版本）。如果该上游版本尚无完整的 WinOptimize Release，就启动五平台构建；**全部构建成功并通过架构检查后才发布新版本**。也可以在 [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions) 手动运行 `Xray-WinOptimize (latest upstream)`，版本输入留空表示选择上游最新 Release。
+GitHub Actions **每天北京时间 12:00** 检查 Xray-core 最新已发布的 Release（包含预发布版本）。如果该上游版本尚无完整的 WinOptimize Release，就启动五平台构建；**全部构建成功并通过架构检查后才发布新版本**。也可以在 [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions) 手动运行 `Xray-WinOptimize (latest upstream)`，版本输入留空表示选择上游最新 Release。
 
 **Windows 7 兼容性：** 对应构建使用 [XTLS/go-win7](https://github.com/XTLS/go-win7) 工具链。自适应优化依赖的 `SIO_TCP_INFO` 接口在 Windows 7 上可能不可用，因此该平台的优化效果和运行兼容性需要实机确认。
 

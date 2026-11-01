@@ -35,7 +35,7 @@ Download the build for your platform from [GitHub Releases](https://github.com/V
 
 **Each ZIP contains only `xray.exe`, `LICENSE`, and `BUILD-INFO.txt`.** The executable has a consistent `xray.exe` name and can be used with compatible command-line setups and graphical clients.
 
-Every **other day**, GitHub Actions checks the latest published Xray-core Release (including prereleases). If that upstream version does not yet have a complete WinOptimize Release, the workflow builds all five targets. **A new Release is published after all five builds succeed and pass architecture checks.** You can also run `Xray-WinOptimize (latest upstream)` manually from [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions); leave the version input empty to use the latest upstream Release.
+Every day at **12:00 Beijing time (UTC 04:00)**, GitHub Actions checks the latest published Xray-core Release (including prereleases). If that upstream version does not yet have a complete WinOptimize Release, the workflow builds all five targets. **A new Release is published after all five builds succeed and pass architecture checks.** You can also run `Xray-WinOptimize (latest upstream)` manually from [Actions](https://github.com/Vikrant-Aleph/Xray-WinOptimize/actions); leave the version input empty to use the latest upstream Release.
 
 **Windows 7 compatibility:** These builds use the [XTLS/go-win7](https://github.com/XTLS/go-win7) toolchain. The adaptive optimization depends on `SIO_TCP_INFO`, which may be unavailable on Windows 7, so runtime compatibility and the optimization's effectiveness need to be verified on a real machine.
 
